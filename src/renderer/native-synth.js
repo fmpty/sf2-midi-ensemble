@@ -1,0 +1,243 @@
+/**
+ * 原生合成引擎（Android 安装包）。
+ *
+ * 发声放在原生层：AAudio（低延迟通路）+ TinySoundFont 渲染 SF2，
+ * 避开 WebView 的 WebAudio（部分机型 300~400 ms 深度缓冲），端到端延迟通常 10~20 ms。
+ *
+ * 对外接口与 SynthEngine 保持一致，界面与路由逻辑无需区分。
+ */
+import { nativeSynthPlugin } from './platform.js';
+
+/** TinySoundFont 单实例为 16 个 MIDI 通道 */
+export const NATIVE_CHANNELS = 16;
+
+export function isNativeSynthAvailable() {
+    return !!nativeSynthPlugin();
+}
+
+function clampCh(ch) {
+    return Math.max(0, Math.min(NATIVE_CHANNELS - 1, ch | 0));
+}
+
+export class NativeSynthEngine {
+    constructor() {
+        this.native = true;
+        this.started = false;
+        this.running = false;
+        this.sampleRate = 0;
+        this.bufferFrames = 0;
+        this.bufferMs = 0;
+        this.burstFrames = 0;
+        this.voiceCount = 0;
+        this.banks = [];
+        this.presets = [];
+        this.masterVolume = 0.9;
+        this.voiceCap = 96;
+        this.maxChannels = NATIVE_CHANNELS;
+        this.createdChannels = NATIVE_CHANNELS;
+        this.listeners = new Map();
+        this.startError = null;
+        this.pollTimer = null;
+    }
+
+    on(name, fn) {
+        this.listeners.set(name, fn);
+    }
+
+    emit(name, payload) {
+        const fn = this.listeners.get(name);
+        if (fn) fn(payload);
+    }
+
+    get latencyMs() {
+        return this.bufferMs || 0;
+    }
+
+    get latencyInfo() {
+        return { base: this.burstFrames / (this.sampleRate || 48000), output: this.bufferMs / 1000 };
+    }
+
+    get lowLatency() {
+        return true;
+    }
+
+    /* ------------------------------ 启动 ------------------------------ */
+
+    async start() {
+        const p = nativeSynthPlugin();
+        if (!p) throw new Error('未找到原生合成插件（SynthBridge）');
+        if (this.started) return;
+
+        const bank = await p.loadBank({});
+        if (!bank || !bank.ok) throw new Error('原生音源载入失败（未找到内置 SF2）');
+
+        const res = await p.start();
+        this.sampleRate = res.sampleRate || 0;
+        this.bufferFrames = res.bufferFrames || 0;
+        this.burstFrames = res.burstFrames || 0;
+        this.bufferMs = res.bufferMs || 0;
+        this.started = true;
+        this.running = !!res.running;
+
+        this.banks = [{ id: 'native', name: bank.path ? bank.path.split('/').pop() : '内置音源', builtin: true }];
+        this.emit('banks', this.banks);
+
+        await this.refreshPresets();
+        this.emit('started');
+        this.pollTimer = setInterval(() => this.refreshStatus(), 500);
+    }
+
+    async refreshPresets() {
+        const p = nativeSynthPlugin();
+        if (!p) return;
+        const res = await p.getPresets();
+        this.presets = res.presets || [];
+        this.emit('presets', this.presets);
+    }
+
+    async refreshStatus() {
+        const p = nativeSynthPlugin();
+        if (!p || !this.started) return;
+        try {
+            const info = await p.getInfo();
+            this.voiceCount = info.voices || 0;
+            this.running = !!info.running;
+            this.bufferMs = info.bufferMs || this.bufferMs;
+        } catch {
+            /* 忽略 */
+        }
+    }
+
+    /* ------------------------------ 音源 ------------------------------ */
+
+    /** 原生层只按文件路径加载；ArrayBuffer 入口在原生模式下不支持 */
+    async addBank(arrayBuffer, name) {
+        if (typeof arrayBuffer === 'string') {
+            const p = nativeSynthPlugin();
+            const res = await p.loadBank({ path: arrayBuffer });
+            if (!res || !res.ok) throw new Error('原生音源载入失败');
+            this.banks = [{ id: 'native', name, builtin: false }];
+            this.emit('banks', this.banks);
+            await this.refreshPresets();
+            return 'native';
+        }
+        throw new Error('原生合成模式不支持从内存载入音源');
+    }
+
+    async removeBank() {
+        return false;
+    }
+
+    setBankOrder() {
+        /* 原生模式只有一个音源 */
+    }
+
+    /* ------------------------------ 参数 ------------------------------ */
+
+    setMasterVolume(v) {
+        this.masterVolume = v;
+        const p = nativeSynthPlugin();
+        if (p) p.setMasterVolume({ volume: v }).catch(() => {});
+    }
+
+    setVoiceCap(n) {
+        this.voiceCap = n;
+        const p = nativeSynthPlugin();
+        if (p) p.setVoiceCap({ cap: n }).catch(() => {});
+    }
+
+    setReverb(wet) {
+        const p = nativeSynthPlugin();
+        if (p) p.setReverb({ wet }).catch(() => {});
+    }
+
+    ensureChannels(count) {
+        this.createdChannels = Math.min(NATIVE_CHANNELS, Math.max(this.createdChannels, count));
+    }
+
+    /** 把一条设备路由的参数写入原生通道 */
+    applyRoute(route) {
+        const p = nativeSynthPlugin();
+        if (!p) return;
+        const ch = clampCh(route.channel);
+        this.ensureChannels(ch + 1);
+        const program = route.isDrum ? route.drumProgram : route.program;
+        p.setChannel({
+            channel: ch,
+            program,
+            isDrum: !!route.isDrum,
+            bank: ((route.bankMSB || 0) << 7) | (route.bankLSB || 0),
+            volume: route.muted ? 0 : route.volume,
+            pan: route.pan,
+        }).catch(() => {});
+    }
+
+    /** 下发路由表：原生 MIDI 插件据此直接发声，不再绕 WebView */
+    setRoutes(routes) {
+        const p = nativeSynthPlugin();
+        if (!p) return;
+        const list = routes.map((r) => ({
+            deviceId: r.deviceId,
+            channel: clampCh(r.channel),
+            transpose: r.transpose,
+            velocityGain: r.velocityGain,
+            velocityCurve: r.velocityCurve,
+            muted: !!r.muted,
+            enabled: r.enabled !== false,
+            allowProgramChange: !!r.allowProgramChange,
+        }));
+        p.setRoutes({ routes: JSON.stringify(list) }).catch(() => {});
+        let wet = 0;
+        let n = 0;
+        for (const r of routes) {
+            if (r.muted) continue;
+            wet += r.reverb || 0;
+            n++;
+        }
+        p.setReverb({ wet: n ? Math.min(1, wet / n) : 0 }).catch(() => {});
+    }
+
+    /* ------------------------------ 演奏 ------------------------------ */
+
+    noteOn(channel, note, velocity) {
+        const p = nativeSynthPlugin();
+        if (p) p.noteOn({ channel: clampCh(channel), note: note | 0, velocity: velocity | 0 }).catch(() => {});
+    }
+
+    noteOff(channel, note) {
+        const p = nativeSynthPlugin();
+        if (p) p.noteOff({ channel: clampCh(channel), note: note | 0 }).catch(() => {});
+    }
+
+    /** 转发原始 MIDI 消息（键盘/滑条等场景使用） */
+    sendMessage(bytes, channelOffset = 0) {
+        const p = nativeSynthPlugin();
+        if (!p || !bytes || !bytes.length) return;
+        const status = bytes[0];
+        if (status >= 0xf0) return;
+        const type = status & 0xf0;
+        const ch = clampCh((status & 0x0f) + channelOffset);
+        if ((type === 0x90 || type === 0x80) && bytes.length >= 3) {
+            const vel = type === 0x80 ? 0 : bytes[2];
+            if (vel > 0) this.noteOn(ch, bytes[1], vel);
+            else this.noteOff(ch, bytes[1]);
+            return;
+        }
+        if (type === 0xb0 && bytes.length >= 3) {
+            p.controlChange({ channel: ch, cc: bytes[1], value: bytes[2] }).catch(() => {});
+            return;
+        }
+        if (type === 0xe0 && bytes.length >= 3) {
+            p.pitchBend({ channel: ch, value: ((bytes[2] & 0x7f) << 7) | (bytes[1] & 0x7f) }).catch(() => {});
+        }
+    }
+
+    stopAll() {
+        const p = nativeSynthPlugin();
+        if (p) p.panic().catch(() => {});
+    }
+
+    reset() {
+        this.stopAll();
+    }
+}

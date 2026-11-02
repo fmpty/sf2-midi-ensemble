@@ -1,0 +1,23 @@
+node_modules/
+src/renderer/dist/
+www/
+.tools/
+android/app/build/
+android/.gradle/
+android/build/
+android/app/src/main/assets/public/
+ios/App/Pods/
+ios/App/App/public/
+ios/App/build/
+out/
+dist/
+tools/*.log
+*.log
+.DS_Store
+
+# 音源由 npm 包（generaluser / freepats）在构建时复制进来，体积大不入仓
+assets/soundfonts/*.sf2
+assets/soundfonts/*.sf3
+assets/soundfonts/*.sfogg
+assets/soundfonts/*.dls
+assets/soundfonts/manifest.json

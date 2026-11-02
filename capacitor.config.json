@@ -1,0 +1,22 @@
+{
+  "appId": "com.sf2.ensemble",
+  "appName": "SF2 MIDI Ensemble",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "loggingEnabled": false,
+  "android": {
+    "allowMixedContent": false,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": true
+  },
+  "ios": {
+    "contentInset": "always",
+    "handleApplicationNotifications": false,
+    "preferredContentMode": "mobile"
+  },
+  "plugins": {
+    "MidiBridge": {
+      "autoConnect": true
+    }
+  }
+}

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">SF2 MIDI Ensemble</string>
+    <string name="title_activity_main">SF2 MIDI Ensemble</string>
+    <string name="package_name">com.sf2.ensemble</string>
+    <string name="custom_url_scheme">com.sf2.ensemble</string>
+</resources>

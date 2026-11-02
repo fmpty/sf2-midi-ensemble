@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; media-src *;" />
+    <title>SF2 MIDI Ensemble · 多手柄合奏器</title>
+    <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+    <div id="start-overlay" class="overlay">
+        <div class="overlay-box">
+            <h1>SF2 MIDI Ensemble</h1>
+            <p>内置 / 载入 SoundFont 音源，同时接入多个蓝牙 MIDI 手柄演奏多个乐器。</p>
+            <button id="btn-start" class="primary">启动音频引擎</button>
+            <p class="tip">浏览器策略要求由用户手势启动音频。启动后会自动载入内置音源并扫描 MIDI 设备。</p>
+        </div>
+    </div>
+
+    <header class="topbar">
+        <div class="brand">
+            <span class="logo">♫</span>
+            <span>SF2 MIDI Ensemble</span>
+            <span id="app-version" class="version"></span>
+        </div>
+        <div class="top-controls">
+            <span class="status">音频：<span id="status-audio" class="warn">未启动</span></span>
+            <label class="slider">主音量
+                <input id="master-volume" type="range" min="0" max="1.5" step="0.01" value="0.9" />
+                <span id="master-volume-val" class="val">90</span>
+            </label>
+            <label class="slider">复音上限
+                <input id="voice-cap" type="range" min="32" max="512" step="16" value="160" />
+                <span id="voice-cap-val" class="val">160</span>
+            </label>
+            <label class="chk"><input id="low-latency" type="checkbox" checked />低延迟</label>
+            <button id="btn-rescan" class="mini">扫描设备</button>
+            <button id="btn-load-bank" class="mini">载入音源</button>
+            <button id="btn-reset" class="mini">复位</button>
+            <button id="btn-panic" class="mini danger">全部停音</button>
+        </div>
+    </header>
+
+    <main>
+        <aside class="side">
+            <section class="panel">
+                <h2>音源（SF2 / SF3 / DLS）</h2>
+                <p class="hint">可直接把 .sf2/.sf3/.dls 文件拖拽到窗口中。排在上方者优先匹配。</p>
+                <div id="bank-list" class="bank-list"></div>
+                <p id="bank-count" class="hint"></p>
+            </section>
+            <section class="panel">
+                <h2>MIDI 设备</h2>
+                <p id="midi-status" class="hint">未连接</p>
+                <p class="hint">
+                    蓝牙 MIDI：请先在系统蓝牙设置中配对手柄，然后点击「扫描设备」。
+                    Windows/macOS/Linux 的 Chromium 内核原生支持 BLE-MIDI。
+                </p>
+                <label class="chk"><input id="kbd-toggle" type="checkbox" checked /> 启用电脑键盘虚拟手柄（A/W/S/E/D… 演奏，Z/X 切换八度）</label>
+            </section>
+            <section class="panel grow">
+                <h2>日志</h2>
+                <div id="log" class="log"></div>
+            </section>
+        </aside>
+
+        <section class="panel devices-panel">
+            <h2>手柄 / 乐器映射<span class="hint">每个手柄独占一个 MIDI 通道，可独立选择乐器与混音参数</span></h2>
+            <div id="device-list" class="device-list"></div>
+        </section>
+    </main>
+
+    <footer>
+        <div class="footer-head">
+            <span>虚拟键盘</span>
+            <span id="piano-info" class="hint"></span>
+        </div>
+        <div id="piano" class="piano"></div>
+        <div class="statusbar">
+            <span>采样率 <b id="stat-rate">-</b></span>
+            <span>输出延迟 <b id="stat-latency">-</b></span>
+            <span>正在发声 <b id="stat-voices">0</b></span>
+            <span>状态 <b id="stat-state">-</b></span>
+        </div>
+    </footer>
+
+    <script src="dist/app.js"></script>
+</body>
+</html>

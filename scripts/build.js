@@ -1,0 +1,120 @@
+/**
+ * 构建脚本：
+ * 1. 用 esbuild 打包渲染层；
+ * 2. 复制 AudioWorklet 处理器文件；
+ * 3. 若 assets/soundfonts 为空，则从 npm 音源包（generaluser / freepats）复制内置音源。
+ */
+const esbuild = require('esbuild');
+const path = require('node:path');
+const fs = require('node:fs');
+
+const ROOT = path.join(__dirname, '..');
+const OUT_DIR = path.join(ROOT, 'src', 'renderer', 'dist');
+const SF_DIR = path.join(ROOT, 'assets', 'soundfonts');
+const SF_EXT = /\.(sf2|sf3|sfogg|dls)$/i;
+const PROVIDERS = ['generaluser', 'freepats'];
+
+const watch = process.argv.includes('--watch');
+
+function findIn(dir) {
+    if (!fs.existsSync(dir)) return null;
+    const stack = [dir];
+    while (stack.length) {
+        const cur = stack.pop();
+        for (const entry of fs.readdirSync(cur, { withFileTypes: true })) {
+            const p = path.join(cur, entry.name);
+            if (entry.isDirectory()) stack.push(p);
+            else if (SF_EXT.test(entry.name)) return p;
+        }
+    }
+    return null;
+}
+
+function ensureSoundfont() {
+    fs.mkdirSync(SF_DIR, { recursive: true });
+    if (fs.readdirSync(SF_DIR).some((f) => SF_EXT.test(f))) {
+        writeManifest();
+        return;
+    }
+    for (const pkg of PROVIDERS) {
+        const src = findIn(path.join(ROOT, 'node_modules', pkg));
+        if (!src) continue;
+        const dest = path.join(SF_DIR, path.basename(src));
+        fs.copyFileSync(src, dest);
+        console.log(`内置音源：${path.basename(src)} (${(fs.statSync(dest).size / 1048576).toFixed(1)} MB)`);
+        writeManifest();
+        return;
+    }
+    console.warn('未找到内置音源，可执行 npm install 后在应用内手动载入 .sf2 文件');
+    writeManifest();
+}
+
+/** 生成音源清单，供浏览器 / Capacitor 模式通过 fetch 发现内置音源 */
+function writeManifest() {
+    const files = fs.readdirSync(SF_DIR)
+        .filter((f) => SF_EXT.test(f))
+        .map((f) => ({ name: f, size: fs.statSync(path.join(SF_DIR, f)).size }));
+    fs.writeFileSync(path.join(SF_DIR, 'manifest.json'), JSON.stringify({ files }, null, 2) + '\n');
+}
+
+/** 组装移动端/网页用的 www 目录（Capacitor 的 webDir） */
+function buildWebBundle() {
+    const www = path.join(ROOT, 'www');
+    const src = path.join(ROOT, 'src', 'renderer');
+    fs.mkdirSync(path.join(www, 'dist'), { recursive: true });
+    fs.mkdirSync(path.join(www, 'assets', 'soundfonts'), { recursive: true });
+    for (const f of ['index.html', 'styles.css', 'dist/app.js', 'dist/spessasynth_processor.min.js',
+        'manifest.webmanifest', 'sw.js']) {
+        const from = path.join(src, f);
+        if (fs.existsSync(from)) fs.copyFileSync(from, path.join(www, f));
+    }
+    // 音源文件较大，用硬链接减少磁盘占用，失败则复制
+    for (const f of fs.readdirSync(SF_DIR)) {
+        const from = path.join(SF_DIR, f);
+        const to = path.join(www, 'assets', 'soundfonts', f);
+        try {
+            if (fs.existsSync(to)) fs.unlinkSync(to);
+            fs.linkSync(from, to);
+        } catch {
+            fs.copyFileSync(from, to);
+        }
+    }
+    console.log('web 资源已组装 -> www/');
+}
+
+async function copyProcessor() {
+    const src = path.join(ROOT, 'node_modules', 'spessasynth_lib', 'dist', 'spessasynth_processor.min.js');
+    if (!fs.existsSync(src)) throw new Error('未找到 spessasynth_processor.min.js，请先 npm install');
+    fs.mkdirSync(OUT_DIR, { recursive: true });
+    fs.copyFileSync(src, path.join(OUT_DIR, 'spessasynth_processor.min.js'));
+}
+
+async function build() {
+    ensureSoundfont();
+    await copyProcessor();
+    const options = {
+        entryPoints: [path.join(ROOT, 'src', 'renderer', 'app.js')],
+        outfile: path.join(OUT_DIR, 'app.js'),
+        bundle: true,
+        format: 'iife',
+        platform: 'browser',
+        target: 'chrome120',
+        sourcemap: false,
+        legalComments: 'none',
+        logLevel: 'info',
+    };
+    if (watch) {
+        const ctx = await esbuild.context(options);
+        await ctx.watch();
+        console.log('esbuild: 监听中…');
+    } else {
+        await esbuild.build(options);
+        console.log('esbuild: 构建完成 ->', path.relative(ROOT, path.join(OUT_DIR, 'app.js')));
+        buildWebBundle();
+    }
+}
+
+build().catch((e) => {
+    console.error(e);
+    process.exit(1);
+});

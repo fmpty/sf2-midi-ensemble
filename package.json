@@ -1,0 +1,56 @@
+{
+  "name": "sf2-midi-ensemble",
+  "productName": "SF2 MIDI Ensemble",
+  "version": "1.0.0",
+  "description": "跨平台 SF2 音源合奏器：内置/加载 SoundFont，同时接入多个蓝牙 MIDI 手柄演奏多个乐器",
+  "main": "src/main/main.js",
+  "author": "SF2 MIDI Ensemble",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build.js",
+    "watch": "node scripts/build.js --watch",
+    "start": "node scripts/build.js && electron .",
+    "smoke": "node scripts/build.js && electron tools/smoke.js",
+    "dist": "node scripts/build.js && electron-builder",
+    "mobile:sync": "node scripts/build.js && npx cap sync && node scripts/sync-native.js",
+    "mobile:android": "npm run mobile:sync && node scripts/build-android.js",
+    "mobile:ios": "npm run mobile:sync && npx cap open ios"
+  },
+  "dependencies": {
+    "spessasynth_lib": "^4.4.2"
+  },
+  "devDependencies": {
+    "@capacitor/android": "^8.6.0",
+    "@capacitor/cli": "^8.6.0",
+    "@capacitor/core": "^8.6.0",
+    "@capacitor/ios": "^8.6.0",
+    "electron": "^45.2.1",
+    "electron-builder": "^26.0.12",
+    "esbuild": "^0.25.0",
+    "generaluser": "^1.47.1"
+  },
+  "build": {
+    "appId": "com.sf2.ensemble",
+    "productName": "SF2 MIDI Ensemble",
+    "icon": "assets/icon.ico",
+    "files": [
+      "src/main/**",
+      "src/renderer/**",
+      "assets/**",
+      "package.json"
+    ],
+    "asar": true,
+    "mac": {
+      "category": "public.app-category.music",
+      "target": "dmg"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "AudioVideo"
+    }
+  }
+}

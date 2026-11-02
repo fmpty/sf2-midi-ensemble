@@ -1,0 +1,33 @@
+/**
+ * Gradle 镜像初始化脚本：在国内网络 / 代理环境下用镜像加速依赖下载。
+ * 通过 --init-script 传入，不修改 Capacitor 生成的工程文件。
+ */
+def mirrorRepos = [
+    'https://maven.aliyun.com/repository/google',
+    'https://maven.aliyun.com/repository/public',
+    'https://mirrors.cloud.tencent.com/nexus/repository/maven-public'
+]
+
+def addMirrors = { RepositoryHandler handler ->
+    mirrorRepos.each { url ->
+        handler.maven { mavenRepo ->
+            mavenRepo.setUrl(url)
+            mavenRepo.content { content ->
+                content.includeGroupByRegex('.*')
+            }
+        }
+    }
+    handler.google()
+    handler.mavenCentral()
+}
+
+gradle.settingsEvaluated { settings ->
+    settings.pluginManagement {
+        addMirrors(it.repositories)
+    }
+}
+
+gradle.beforeProject { project ->
+    addMirrors(project.buildscript.repositories)
+    addMirrors(project.repositories)
+}
