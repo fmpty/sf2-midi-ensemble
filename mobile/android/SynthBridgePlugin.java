@@ -46,9 +46,12 @@ public class SynthBridgePlugin extends Plugin {
 
     /* ------------------------------ native 声明 ------------------------------ */
 
+    private static volatile boolean libOk = false;
+
     static {
         try {
             System.loadLibrary("nativesynth");
+            libOk = true;
         } catch (Throwable t) {
             android.util.Log.e("SynthBridge", "加载 nativesynth 失败：" + t.getMessage());
         }
@@ -123,7 +126,7 @@ public class SynthBridgePlugin extends Plugin {
 
     /** MIDI 插件直连接口：设备 MIDI 数据不经过 WebView，直接在这里发声 */
     public static boolean deliver(String deviceId, byte[] msg, int offset, int count) {
-        if (instance == null || !instance.bankLoaded) return false;
+        if (instance == null || !libOk || !instance.bankLoaded) return false;
         return instance.handleMidi(deviceId, msg, offset, count);
     }
 
@@ -190,16 +193,30 @@ public class SynthBridgePlugin extends Plugin {
     /** 载入音源：path 为空时自动取 APK 内置 assets 里的 SF2 */
     @PluginMethod
     public void loadBank(final PluginCall call) {
+        if (!libOk) {
+            call.reject("原生合成库未加载（设备可能不支持 AAudio）");
+            return;
+        }
         final String path = call.getString("path");
         worker.execute(() -> {
-            String target = path;
-            if (target == null || target.isEmpty()) target = copyBuiltinBank();
-            boolean ok = target != null && nativeLoadBank(target);
+            String target = null;
+            boolean ok = false;
+            String error = null;
+            try {
+                target = path;
+                if (target == null || target.isEmpty()) target = copyBuiltinBank();
+                ok = target != null && nativeLoadBank(target);
+            } catch (Throwable t) {
+                // 防止 JNI 签名错配等异常直接炸掉进程
+                error = String.valueOf(t);
+                android.util.Log.e("SynthBridge", "载入音源异常", t);
+            }
             bankLoaded = ok;
             JSObject res = new JSObject();
             res.put("ok", ok);
             res.put("path", target == null ? "" : target);
             res.put("presets", ok ? nativeGetPresetCount() : 0);
+            if (error != null) res.put("error", error);
             call.resolve(res);
         });
     }
@@ -315,10 +332,12 @@ public class SynthBridgePlugin extends Plugin {
             nativeBankSelect(ch, call.getInt("bank", 0));
         }
         if (call.getData().has("volume")) {
-            nativeSetChannelVolume(ch, (float) call.getDouble("volume", 1.0d));
+            Double v = call.getDouble("volume", Double.valueOf(1.0d));
+            nativeSetChannelVolume(ch, v == null ? 1.0f : v.floatValue());
         }
         if (call.getData().has("pan")) {
-            float pan = (float) call.getDouble("pan", 0.0d); // -1..1
+            Double p = call.getDouble("pan", Double.valueOf(0.0d));
+            float pan = p == null ? 0.0f : p.floatValue(); // -1..1
             nativeSetChannelPan(ch, (pan + 1.0f) / 2.0f);
         }
         call.resolve();

@@ -12,7 +12,16 @@ import { routeMidiMessage } from './midi.js';
 export function nativeMidiPlugin() {
     if (typeof window === 'undefined') return null;
     const cap = window.Capacitor;
-    return cap && cap.Plugins ? cap.Plugins.MidiBridge || null : null;
+    if (!cap || typeof cap.isNativePlatform !== 'function' || !cap.isNativePlatform()) return null;
+    if (cap.Plugins && cap.Plugins.MidiBridge) return cap.Plugins.MidiBridge;
+    if (typeof cap.registerPlugin === 'function') {
+        try {
+            return cap.registerPlugin('MidiBridge');
+        } catch {
+            return null;
+        }
+    }
+    return null;
 }
 
 export function isNativeMidiAvailable() {
@@ -54,8 +63,9 @@ export class NativeMidiHub {
         if (!p) throw new Error('未找到原生 MIDI 插件（MidiBridge）');
         if (!this.bound) {
             this.bound = true;
-            await p.addListener('midiMessage', (ev) => this.handle(ev));
-            await p.addListener('devicesChanged', (ev) => this.refreshFromEvent(ev)).catch(() => {});
+            // 不同注入路径下 addListener 可能返回 Promise 也可能同步返回，统一包一层
+            await Promise.resolve(p.addListener('midiMessage', (ev) => this.handle(ev)));
+            await Promise.resolve(p.addListener('devicesChanged', (ev) => this.refreshFromEvent(ev))).catch(() => {});
         }
         try {
             await p.openAll();

@@ -15,11 +15,25 @@ export function isElectron() {
     return typeof window !== 'undefined' && !!window.api;
 }
 
-/** 原生合成插件（Android 安装包）：AAudio + TinySoundFont */
-export function nativeSynthPlugin() {
+/** 原生插件动态注册：Capacitor 只给带 npm 包的插件建代理，纯原生插件需自己注册 */
+function capacitorPlugin(name) {
     if (typeof window === 'undefined') return null;
     const cap = window.Capacitor;
-    return cap && cap.Plugins ? cap.Plugins.SynthBridge || null : null;
+    if (!cap || typeof cap.isNativePlatform !== 'function' || !cap.isNativePlatform()) return null;
+    if (cap.Plugins && cap.Plugins[name]) return cap.Plugins[name];
+    if (typeof cap.registerPlugin === 'function') {
+        try {
+            return cap.registerPlugin(name);
+        } catch {
+            return null;
+        }
+    }
+    return null;
+}
+
+/** 原生合成插件（Android 安装包）：AAudio + TinySoundFont */
+export function nativeSynthPlugin() {
+    return capacitorPlugin('SynthBridge');
 }
 
 export function isMobile() {

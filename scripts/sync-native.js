@@ -55,6 +55,7 @@ function syncAndroid() {
     copyFile(path.join(MOBILE, 'android', 'SynthBridgePlugin.java'),
         path.join(ROOT, 'android', 'app', 'src', 'main', 'java', 'com', 'sf2ensemble', 'synth', 'SynthBridgePlugin.java'));
     patchAndroidBuild();
+    patchMainActivity();
     // 使用 Java 实现（app 模块未启用 Kotlin 插件，.kt 不会被编译）
     const legacyKt = path.join(path.dirname(ktDest), 'MidiBridgePlugin.kt');
     if (fs.existsSync(legacyKt)) {
@@ -75,7 +76,40 @@ function syncAndroid() {
     }
 }
 
-/** 给 app 模块加上 NDK 构建（CMake）并把 minSdk 提到 26（AAudio 要求） */
+/** Capacitor 不会自动注册原生插件：在 MainActivity 里显式注册 MidiBridge / SynthBridge */
+function patchMainActivity() {
+    const main = path.join(ROOT, 'android', 'app', 'src', 'main', 'java', 'com', 'sf2', 'ensemble', 'MainActivity.java');
+    if (!fs.existsSync(main)) {
+        console.log('  未找到 MainActivity.java');
+        return;
+    }
+    const text = fs.readFileSync(main, 'utf8');
+    if (text.includes('registerPlugin(')) {
+        console.log('  MainActivity 已注册插件');
+        return;
+    }
+    const pkg = (text.match(/package\s+([\w.]+);/) || [])[1] || 'com.sf2.ensemble';
+    const content = `package ${pkg};
+
+import android.os.Bundle;
+
+import com.getcapacitor.BridgeActivity;
+import com.sf2ensemble.midi.MidiBridgePlugin;
+import com.sf2ensemble.synth.SynthBridgePlugin;
+
+public class MainActivity extends BridgeActivity {
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        registerPlugin(MidiBridgePlugin.class);
+        registerPlugin(SynthBridgePlugin.class);
+        super.onCreate(savedInstanceState);
+    }
+}
+`;
+    writeIfChanged(main, content);
+}
+
+/** 给 app 模块加上 NDK 构建（CMake）并把 minSdk 提到 28（AAudio usage/contentType 要求） */
 function patchAndroidBuild() {
     const gradle = path.join(ROOT, 'android', 'app', 'build.gradle');
     if (fs.existsSync(gradle)) {
@@ -99,8 +133,8 @@ $1`);
     const vars = path.join(ROOT, 'android', 'variables.gradle');
     if (fs.existsSync(vars)) {
         let text = fs.readFileSync(vars, 'utf8');
-        if (/minSdkVersion = 2[0-5]\b/.test(text)) {
-            text = text.replace(/minSdkVersion = \d+/, 'minSdkVersion = 26');
+        if (/minSdkVersion = 2[0-7]\b/.test(text)) {
+            text = text.replace(/minSdkVersion = \d+/, 'minSdkVersion = 28');
             writeIfChanged(vars, text);
         }
     }

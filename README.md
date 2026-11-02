@@ -97,17 +97,54 @@ Electron 不支持移动端，因此移动端用 **Capacitor** 复用同一套 W
    └─ Capacitor（Android / iOS 安装包，原生 MIDI 插件）
 ```
 
-### 音频延迟（尤其 Android）
+### 原生合成：把发声从 WebView 搬到 native（Android）
 
-顶栏新增「低延迟」开关（默认开）：以 `latencyHint: 0` 创建 AudioContext，请求系统最小音频缓冲；
-启动日志会打印 `缓冲 x ms / 输出 y ms`，便于对比。其余降延迟措施：
+WebView 的 WebAudio 在部分安卓机上走系统「深度缓冲」通路，`outputLatency` 高达 300~400 ms 且 JS 侧无法压低。
+因此 Android 安装包把**合成与输出都放进原生层**：
 
-- 移动端默认把复音上限从 160 降到 64（CPU 欠载会间接放大延迟与卡顿）；
-- 关闭卷积混响，仅使用合成器内置效果；
-- 不强制采样率，避免系统重采样带来的额外缓冲。
+```
+蓝牙/USB MIDI 手柄
+   └─ MidiBridge（android.media.midi，Java）
+        └─ SynthBridge（JNI）→ native_synth.cpp
+                                  ├─ TinySoundFont：SF2 解析与音色渲染
+                                  └─ AAudio：EXCLUSIVE + LOW_LATENCY，缓冲 1 个 burst
+屏幕键盘 / 电脑键盘 → JS → SynthBridge（JNI）→ 同一条链路
+```
 
-> 若某台 Android 机器仍显示 300~400 ms，那是该系统 WebView 走的是 Android「深度缓冲」音频通路，
-> JS 侧无法再压低，需要原生 AAudio/Oboe 输出通道（Android 8.1+ 支持）才能到 20 ms 级。
+关键实现：
+
+- **AAudio 低延迟输出**：`PERFORMANCE_MODE_LOW_LATENCY` + `SHARING_MODE_EXCLUSIVE`（失败自动回退共享模式），
+  缓冲压到 `getFramesPerBurst()`（通常 48~192 帧，约 1~4 ms），端到端一般 10~20 ms。
+- **TSF 线程安全**：TinySoundFont 非线程安全，所有音符/控制事件写入无锁环形队列，
+  由音频回调线程统一消费，tsf 实例只在回调线程被访问。
+- **MIDI 不绕 WebView**：路由表（通道/移调/力度曲线/静音）下发到原生层，
+  手柄数据由 `MidiBridge` 直接送 `SynthBridge` 发声，WebView 只负责界面高亮（事件带 `played` 标记）。
+- **内置音源**：原生层直接从 APK assets 复制 SF2 到内部存储并加载，30 MB 音源不再进 JS 内存。
+- 附带一个轻量 Freeverb 混响（全局 wet，取各路由混响均值）。
+
+### 手机上确认是否走了原生合成
+
+打开应用点「启动音频引擎」后，首行日志应为：
+
+```
+原生合成已启动（AAudio 48000 Hz，缓冲 3 ms）
+```
+
+若仍是 `音频引擎已启动（…）`，说明没走原生（插件未注册或库未加载）；
+若出现 `原生合成不可用（…），回退 WebAudio + spessasynth`，说明原生链路失败但已自动回退，仍可演奏。
+
+已知取舍：
+
+| 项 | 说明 |
+|---|---|
+| 通道数 | TinySoundFont 单实例 16 个 MIDI 通道（够 16 个手柄各一路） |
+| 效果 | 混响为全局近似；不支持合唱（TSF 不实现 chorus send） |
+| 换音源 | 应用内暂不载入外部 SF2（原生层按文件路径加载），需打包进 assets |
+| 系统版本 | `minSdkVersion 28`（Android 9+，AAudio usage/contentType 要求） |
+| 蓝牙输出 | 用蓝牙耳机时延迟由蓝牙决定（通常 150~300 ms），与合成层无关 |
+
+> iOS 未改：WebKit 的 WebAudio 通常只有 20~40 ms，若实测仍不满意，
+> 可再按同样思路用 `AVAudioEngine` + `AVAudioUnitSampler` 做原生合成。
 
 | 平台 | 方式 |
 |---|---|

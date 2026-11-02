@@ -21,8 +21,16 @@ const state = {
 };
 
 // 原生安装包走原生合成（AAudio + TinySoundFont），其余走 WebAudio + spessasynth
-const engine = isNativeSynthAvailable() ? new NativeSynthEngine() : new SynthEngine();
-const MAX_CHANNELS = engine.maxChannels || 32;
+let engine = isNativeSynthAvailable() ? new NativeSynthEngine() : new SynthEngine();
+let MAX_CHANNELS = engine.maxChannels || 32;
+
+/** 引擎切换（原生合成不可用时回退） */
+function swapEngine(next) {
+    engine = next;
+    MAX_CHANNELS = next.maxChannels || 32;
+    hub.engine = next;
+    vkb.engine = next;
+}
 // 原生安装包走原生 MIDI 插件，桌面/浏览器走 Web MIDI
 const hub = isNativeMidiAvailable() ? new NativeMidiHub(engine) : new MidiHub(engine);
 const vkb = new VirtualKeyboard(engine);
@@ -201,6 +209,11 @@ function renderDevices() {
     }
     if (!keys.length) {
         wrap.innerHTML = '<div class="empty">尚未检测到 MIDI 设备。请打开蓝牙 MIDI 手柄并点击「扫描设备」。</div>';
+    }
+    const online = keys.filter((k) => state.routes[k].online !== false).length;
+    if (dom.devCount) {
+        dom.devCount.textContent = String(online);
+        dom.devCount.classList.toggle('show', online > 0);
     }
 }
 
@@ -520,7 +533,7 @@ function renderPiano() {
             key.dataset.note = n;
             key.title = `${noteName(n)}${DRUM_NOTES[n] ? ' · ' + DRUM_NOTES[n] : ''}`;
             if (isBlack) {
-                key.style.left = `calc(${whiteIndex * w}% - 10px)`;
+                key.style.left = `calc(${whiteIndex * w}% - var(--bw) / 2)`;
             } else {
                 whiteIndex++;
             }
@@ -529,7 +542,35 @@ function renderPiano() {
         }
         bindPiano();
     }
-    dom.pianoInfo.textContent = route ? `演奏目标：${route.label || route.name}` : '请先在右侧选择一个设备';
+    renderTargetChips();
+    dom.pianoInfo.textContent = route ? `当前目标：${route.label || route.name}` : '请先在「手柄」页选择一个设备';
+}
+
+/* ------------------------------ 演奏目标快捷切换 ------------------------------ */
+
+let chipBound = false;
+
+function renderTargetChips() {
+    const wrap = dom.targetChips;
+    if (!wrap) return;
+    const cur = currentPianoRoute();
+    const keys = state.order.filter((k) => state.routes[k]);
+    wrap.innerHTML = keys.map((k) => {
+        const r = state.routes[k];
+        const on = cur && cur.key === k;
+        const cls = `chip${on ? ' on' : ''}${r.online === false ? ' off' : ''}`;
+        return `<button class="${cls}" data-key="${k}">${escapeHtml(r.label || r.name)}</button>`;
+    }).join('') || '<span class="hint">暂无设备</span>';
+    if (!chipBound) {
+        chipBound = true;
+        wrap.addEventListener('click', (e) => {
+            const btn = e.target.closest ? e.target.closest('.chip') : null;
+            if (!btn) return;
+            state.selected = btn.dataset.key;
+            renderDevices();
+            renderPiano();
+        });
+    }
 }
 
 /* ------------------------------ 音源管理 ------------------------------ */
@@ -622,8 +663,8 @@ async function loadConfig() {
 
 /* ------------------------------ 启动流程 ------------------------------ */
 
-async function ensureEngine() {
-    if (engine.started) { await engine.ctx.resume(); return; }
+async function ensureEngine(retry = false) {
+    if (engine.started) { if (engine.ctx) await engine.ctx.resume(); return; }
     dom.btnStart.disabled = true;
     dom.btnStart.textContent = '启动中…';
     try {
@@ -652,6 +693,12 @@ async function ensureEngine() {
         updateStatus();
         dom.startOverlay.classList.add('hidden');
     } catch (e) {
+        // 原生合成不可用（老设备 / 缺 AAudio / 音源缺失）时回退到 WebAudio，保证能发声
+        if (!retry && engine.native) {
+            log(`原生合成不可用（${e.message}），回退 WebAudio + spessasynth`, 'warn');
+            swapEngine(new SynthEngine());
+            return ensureEngine(true);
+        }
         log(`启动失败：${e.message}`, 'error');
         dom.btnStart.disabled = false;
         dom.btnStart.textContent = '启动音频引擎';
@@ -702,8 +749,30 @@ function updateStatus() {
 
 /* ------------------------------ 事件绑定 ------------------------------ */
 
+/* ------------------------------ 分页 ------------------------------ */
+
+const TABS = ['play', 'devices', 'sound', 'more'];
+
+function showTab(name) {
+    const tab = TABS.includes(name) ? name : 'play';
+    document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === tab));
+    document.querySelectorAll('.tab-pane').forEach((p) => p.classList.toggle('active', p.id === `pane-${tab}`));
+    try { localStorage.setItem('uiTab', tab); } catch { /* 忽略 */ }
+}
+
+function bindTabs() {
+    dom.tabs.addEventListener('click', (e) => {
+        const btn = e.target.closest ? e.target.closest('.tab') : null;
+        if (btn) showTab(btn.dataset.tab);
+    });
+    let saved = 'play';
+    try { saved = localStorage.getItem('uiTab') || 'play'; } catch { /* 忽略 */ }
+    showTab(saved);
+}
+
 function bindUI() {
-    dom.btnStart.addEventListener('click', ensureEngine);
+    bindTabs();
+    dom.btnStart.addEventListener('click', () => ensureEngine());
     dom.btnRescan.addEventListener('click', async () => {
         hub.rescan();
         await connectMidi().catch(() => {});
@@ -779,10 +848,10 @@ function bindUI() {
 /* ------------------------------ 初始化 ------------------------------ */
 
 async function main() {
-    const ids = ['btn-start', 'start-overlay', 'status-audio', 'master-volume', 'master-volume-val', 'voice-cap',
-        'voice-cap-val', 'bank-list', 'bank-count', 'btn-load-bank', 'device-list', 'btn-rescan', 'midi-status',
-        'btn-panic', 'btn-reset', 'kbd-toggle', 'piano', 'piano-info', 'stat-rate', 'stat-latency', 'stat-voices',
-        'stat-state', 'log', 'app-version', 'low-latency'];
+    const ids = ['btn-start', 'start-overlay', 'status-audio', 'audio-dot', 'master-volume', 'master-volume-val',
+        'voice-cap', 'voice-cap-val', 'bank-list', 'bank-count', 'btn-load-bank', 'device-list', 'btn-rescan',
+        'midi-status', 'btn-panic', 'btn-reset', 'kbd-toggle', 'piano', 'piano-info', 'stat-rate', 'stat-latency',
+        'stat-voices', 'stat-state', 'log', 'app-version', 'low-latency', 'tabs', 'target-chips', 'dev-count'];
     ids.forEach((id) => { dom[camel(id)] = el(id); });
     dom.devices = el('device-list');
 
@@ -804,7 +873,11 @@ async function main() {
 
     engine.on('presets', () => { renderDevices(); renderBanks(); });
     engine.on('bankError', (e) => log(`音源解析失败：${e && e.message}`, 'error'));
-    engine.on('started', () => { dom.statusAudio.textContent = '运行中'; dom.statusAudio.className = 'ok'; });
+    engine.on('started', () => {
+        dom.statusAudio.textContent = '运行中';
+        dom.statusAudio.className = 'ok';
+        if (dom.audioDot) dom.audioDot.className = 'dot dot-on';
+    });
 
     await loadConfig();
     // 手机 CPU 有限，复音过多会导致音频线程欠载，间接放大延迟与卡顿
@@ -839,7 +912,7 @@ async function main() {
     syncDevices([]);
     setInterval(updateStatus, 500);
     // 便于调试 / 自动化测试
-    window.__ensemble = { engine, hub, vkb, state, pianoActive, pianoPress, pianoRelease, renderPiano };
+    window.__ensemble = { engine, hub, vkb, state, pianoActive, pianoPress, pianoRelease, renderPiano, showTab };
 }
 
 function camel(id) {

@@ -1,5 +1,16 @@
 package com.sf2.ensemble;
 
-import com.getcapacitor.BridgeActivity;
+import android.os.Bundle;
 
-public class MainActivity extends BridgeActivity {}
+import com.getcapacitor.BridgeActivity;
+import com.sf2ensemble.midi.MidiBridgePlugin;
+import com.sf2ensemble.synth.SynthBridgePlugin;
+
+public class MainActivity extends BridgeActivity {
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        registerPlugin(MidiBridgePlugin.class);
+        registerPlugin(SynthBridgePlugin.class);
+        super.onCreate(savedInstanceState);
+    }
+}

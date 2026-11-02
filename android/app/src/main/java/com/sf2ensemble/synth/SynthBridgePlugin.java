@@ -1,0 +1,433 @@
+package com.sf2ensemble.synth;
+
+import android.content.Context;
+import android.content.res.AssetManager;
+import android.os.Handler;
+import android.os.Looper;
+
+import com.getcapacitor.JSArray;
+import com.getcapacitor.JSObject;
+import com.getcapacitor.Plugin;
+import com.getcapacitor.PluginCall;
+import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.CapacitorPlugin;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+/**
+ * 原生合成桥（Android）。
+ *
+ * 合成放在 native 层：AAudio（低延迟通路）输出 + TinySoundFont 渲染 SF2，
+ * 不再经过 WebView 的 WebAudio，端到端延迟从部分机型的 300~400 ms 降到 10~20 ms 级。
+ *
+ * 同时保存设备路由表，MIDI 插件（MidiBridge）可把 MIDI 字节流直接送到这里发声，
+ * 不必绕 WebView，进一步降低手柄到出声的延迟。
+ */
+@CapacitorPlugin(name = "SynthBridge")
+public class SynthBridgePlugin extends Plugin {
+
+    private static SynthBridgePlugin instance;
+    private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final Map<String, Route> routes = new LinkedHashMap<>();
+    private boolean bankLoaded = false;
+
+    /* ------------------------------ native 声明 ------------------------------ */
+
+    private static volatile boolean libOk = false;
+
+    static {
+        try {
+            System.loadLibrary("nativesynth");
+            libOk = true;
+        } catch (Throwable t) {
+            android.util.Log.e("SynthBridge", "加载 nativesynth 失败：" + t.getMessage());
+        }
+    }
+
+    public static native boolean nativeLoadBank(String path);
+
+    public static native boolean nativeStart();
+
+    public static native void nativeStop();
+
+    public static native boolean nativeIsRunning();
+
+    public static native void nativeNoteOn(int channel, int note, int velocity);
+
+    public static native void nativeNoteOff(int channel, int note);
+
+    public static native void nativeControlChange(int channel, int cc, int value);
+
+    public static native void nativeProgramChange(int channel, int program, int drum);
+
+    public static native void nativeBankSelect(int channel, int bank);
+
+    public static native void nativePitchBend(int channel, int value);
+
+    public static native void nativeSetChannelVolume(int channel, float volume);
+
+    public static native void nativeSetChannelPan(int channel, float pan01);
+
+    public static native void nativeChannelSoundsOff(int channel);
+
+    public static native void nativeAllNotesOff();
+
+    public static native void nativeSetMasterVolume(float volume);
+
+    public static native void nativeSetReverb(float wet);
+
+    public static native void nativeSetVoiceCap(int n);
+
+    public static native int nativeGetVoices();
+
+    public static native int nativeGetSampleRate();
+
+    public static native int nativeGetBufferFrames();
+
+    public static native int nativeGetBurstFrames();
+
+    public static native int nativeGetPresetCount();
+
+    public static native String nativeGetPresetInfo(int index);
+
+    /* -------------------------------- 路由 -------------------------------- */
+
+    static final class Route {
+        int channel;
+        int transpose;
+        float velocityGain;
+        String velocityCurve = "linear";
+        boolean muted;
+        boolean enabled = true;
+        boolean allowProgramChange;
+    }
+
+    @Override
+    public void load() {
+        instance = this;
+    }
+
+    public static boolean isAvailable() {
+        return instance != null;
+    }
+
+    /** MIDI 插件直连接口：设备 MIDI 数据不经过 WebView，直接在这里发声 */
+    public static boolean deliver(String deviceId, byte[] msg, int offset, int count) {
+        if (instance == null || !libOk || !instance.bankLoaded) return false;
+        return instance.handleMidi(deviceId, msg, offset, count);
+    }
+
+    private boolean handleMidi(String deviceId, byte[] msg, int offset, int count) {
+        if (count < 1) return false;
+        Route r = routes.get(deviceId);
+        if (r == null || !r.enabled || r.muted) return false;
+        int status = msg[offset] & 0xff;
+        if (status >= 0xf0) return false; // 系统消息（时钟等）不处理
+        int type = status & 0xf0;
+        int ch = r.channel & 15;
+        if (type == 0x90 || type == 0x80) {
+            if (count < 3) return false;
+            int note = msg[offset + 1] & 0x7f;
+            int vel = type == 0x80 ? 0 : transformVelocity(msg[offset + 2] & 0x7f, r);
+            note += r.transpose;
+            if (note < 0) note = 0;
+            if (note > 127) note = 127;
+            if (vel > 0) nativeNoteOn(ch, note, vel);
+            else nativeNoteOff(ch, note);
+            return true;
+        }
+        if (type == 0xb0) {
+            if (count < 3) return false;
+            nativeControlChange(ch, msg[offset + 1] & 0x7f, msg[offset + 2] & 0x7f);
+            return true;
+        }
+        if (type == 0xe0) {
+            if (count < 3) return false;
+            nativePitchBend(ch, ((msg[offset + 2] & 0x7f) << 7) | (msg[offset + 1] & 0x7f));
+            return true;
+        }
+        if (type == 0xc0 && r.allowProgramChange && count >= 2) {
+            nativeProgramChange(ch, msg[offset + 1] & 0x7f, 0);
+            return true;
+        }
+        return false;
+    }
+
+    private static int transformVelocity(int raw, Route r) {
+        if (raw == 0) return 0;
+        float v = raw / 127.0f;
+        switch (r.velocityCurve) {
+            case "soft":
+                v = (float) Math.pow(v, 1.6);
+                break;
+            case "hard":
+                v = (float) Math.pow(v, 0.65);
+                break;
+            case "fixed":
+                v = 0.85f;
+                break;
+            default:
+                break;
+        }
+        v *= r.velocityGain;
+        int out = Math.round(v * 127);
+        if (out > 127) out = 127;
+        return out < 1 ? 1 : out;
+    }
+
+    /* ------------------------------ 插件方法 ------------------------------ */
+
+    /** 载入音源：path 为空时自动取 APK 内置 assets 里的 SF2 */
+    @PluginMethod
+    public void loadBank(final PluginCall call) {
+        if (!libOk) {
+            call.reject("原生合成库未加载（设备可能不支持 AAudio）");
+            return;
+        }
+        final String path = call.getString("path");
+        worker.execute(() -> {
+            String target = null;
+            boolean ok = false;
+            String error = null;
+            try {
+                target = path;
+                if (target == null || target.isEmpty()) target = copyBuiltinBank();
+                ok = target != null && nativeLoadBank(target);
+            } catch (Throwable t) {
+                // 防止 JNI 签名错配等异常直接炸掉进程
+                error = String.valueOf(t);
+                android.util.Log.e("SynthBridge", "载入音源异常", t);
+            }
+            bankLoaded = ok;
+            JSObject res = new JSObject();
+            res.put("ok", ok);
+            res.put("path", target == null ? "" : target);
+            res.put("presets", ok ? nativeGetPresetCount() : 0);
+            if (error != null) res.put("error", error);
+            call.resolve(res);
+        });
+    }
+
+    @PluginMethod
+    public void start(PluginCall call) {
+        boolean ok = nativeStart();
+        JSObject res = new JSObject();
+        res.put("running", ok);
+        res.put("sampleRate", nativeGetSampleRate());
+        res.put("bufferFrames", nativeGetBufferFrames());
+        res.put("burstFrames", nativeGetBurstFrames());
+        int rate = nativeGetSampleRate();
+        res.put("bufferMs", rate > 0 ? (nativeGetBufferFrames() * 1000 / rate) : 0);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void stop(PluginCall call) {
+        nativeStop();
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void noteOn(PluginCall call) {
+        int ch = call.getInt("channel", 0);
+        int note = call.getInt("note", 60);
+        int vel = call.getInt("velocity", 100);
+        nativeNoteOn(clampChannel(ch), clamp(note, 0, 127), clamp(vel, 1, 127));
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void noteOff(PluginCall call) {
+        nativeNoteOff(clampChannel(call.getInt("channel", 0)), clamp(call.getInt("note", 60), 0, 127));
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void panic(PluginCall call) {
+        nativeAllNotesOff();
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void controlChange(PluginCall call) {
+        nativeControlChange(clampChannel(call.getInt("channel", 0)),
+                clamp(call.getInt("cc", 0), 0, 127), clamp(call.getInt("value", 0), 0, 127));
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void pitchBend(PluginCall call) {
+        nativePitchBend(clampChannel(call.getInt("channel", 0)), call.getInt("value", 8192));
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void setMasterVolume(PluginCall call) {
+        double v = call.getDouble("volume", 0.9d);
+        nativeSetMasterVolume((float) v);
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void setReverb(PluginCall call) {
+        double v = call.getDouble("wet", 0.0d);
+        nativeSetReverb((float) v);
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void setVoiceCap(PluginCall call) {
+        nativeSetVoiceCap(call.getInt("cap", 96));
+        call.resolve();
+    }
+
+    /** 下发设备路由表（原生直连 MIDI 时用它做通道/力度/移调映射） */
+    @PluginMethod
+    public void setRoutes(PluginCall call) {
+        String json = call.getString("routes");
+        routes.clear();
+        if (json != null) {
+            try {
+                JSONArray arr = new JSONArray(json);
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject o = arr.getJSONObject(i);
+                    Route r = new Route();
+                    r.channel = o.optInt("channel", 0);
+                    r.transpose = o.optInt("transpose", 0);
+                    r.velocityGain = (float) o.optDouble("velocityGain", 1.0);
+                    r.velocityCurve = o.optString("velocityCurve", "linear");
+                    r.muted = o.optBoolean("muted", false);
+                    r.enabled = o.optBoolean("enabled", true);
+                    r.allowProgramChange = o.optBoolean("allowProgramChange", false);
+                    routes.put(o.optString("deviceId", ""), r);
+                }
+            } catch (Exception ignored) {
+            }
+        }
+        call.resolve();
+    }
+
+    /** 通道参数：乐器 / 音量 / 声像 */
+    @PluginMethod
+    public void setChannel(PluginCall call) {
+        int ch = clampChannel(call.getInt("channel", 0));
+        if (call.getData().has("program")) {
+            nativeProgramChange(ch, clamp(call.getInt("program", 0), 0, 127),
+                    call.getBoolean("isDrum", false) ? 1 : 0);
+        }
+        if (call.getData().has("bank")) {
+            nativeBankSelect(ch, call.getInt("bank", 0));
+        }
+        if (call.getData().has("volume")) {
+            Double v = call.getDouble("volume", Double.valueOf(1.0d));
+            nativeSetChannelVolume(ch, v == null ? 1.0f : v.floatValue());
+        }
+        if (call.getData().has("pan")) {
+            Double p = call.getDouble("pan", Double.valueOf(0.0d));
+            float pan = p == null ? 0.0f : p.floatValue(); // -1..1
+            nativeSetChannelPan(ch, (pan + 1.0f) / 2.0f);
+        }
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void getPresets(PluginCall call) {
+        int count = nativeGetPresetCount();
+        JSArray arr = new JSArray();
+        for (int i = 0; i < count; i++) {
+            String info = nativeGetPresetInfo(i);
+            if (info == null || info.isEmpty()) continue;
+            String[] parts = info.split("\\|");
+            if (parts.length < 3) continue;
+            try {
+                int bank = Integer.parseInt(parts[1]);
+                JSObject o = new JSObject();
+                o.put("name", parts[0]);
+                o.put("bankMSB", (bank >> 7) & 0x7f);
+                o.put("bankLSB", bank & 0x7f);
+                o.put("program", Integer.parseInt(parts[2]));
+                arr.put(o);
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        JSObject res = new JSObject();
+        res.put("presets", arr);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void getInfo(PluginCall call) {
+        int rate = nativeGetSampleRate();
+        int buf = nativeGetBufferFrames();
+        JSObject res = new JSObject();
+        res.put("running", nativeIsRunning());
+        res.put("sampleRate", rate);
+        res.put("bufferFrames", buf);
+        res.put("burstFrames", nativeGetBurstFrames());
+        res.put("bufferMs", rate > 0 ? (buf * 1000 / rate) : 0);
+        res.put("voices", nativeGetVoices());
+        res.put("bankLoaded", bankLoaded);
+        call.resolve(res);
+    }
+
+    /* ------------------------------ 内置音源 ------------------------------ */
+
+    /** 把 APK assets 里的 SF2 复制到内部存储（native 层只能读文件路径） */
+    private String copyBuiltinBank() {
+        Context ctx = getContext();
+        if (ctx == null) return null;
+        try {
+            AssetManager am = ctx.getAssets();
+            String dir = "public/assets/soundfonts";
+            String[] files = am.list(dir);
+            if (files == null) return null;
+            String pick = null;
+            for (String f : files) {
+                if (f.endsWith(".sf2") || f.endsWith(".sf3") || f.endsWith(".dls")) {
+                    pick = f;
+                    break;
+                }
+            }
+            if (pick == null) return null;
+            File out = new File(ctx.getFilesDir(), pick);
+            if (!out.exists() || out.length() == 0) {
+                try (InputStream in = am.open(dir + "/" + pick); OutputStream os = new FileOutputStream(out)) {
+                    byte[] buf = new byte[256 * 1024];
+                    int n;
+                    while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+                }
+            }
+            return out.getAbsolutePath();
+        } catch (Exception e) {
+            android.util.Log.e("SynthBridge", "复制内置音源失败：" + e.getMessage());
+            return null;
+        }
+    }
+
+    private static int clampChannel(int ch) {
+        return ch < 0 ? 0 : (ch > 15 ? 15 : ch);
+    }
+
+    private static int clamp(int v, int lo, int hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        nativeStop();
+        super.handleOnDestroy();
+    }
+}

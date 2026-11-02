@@ -295,7 +295,7 @@ bool openStream() {
 extern "C" {
 
 JNIEXPORT jboolean JNICALL
-Java_com_sf2ensemble_synth_SynthBridge_nativeLoadBank(JNIEnv *env, jclass, jstring jpath) {
+Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeLoadBank(JNIEnv *env, jclass, jstring jpath) {
     const char *path = env->GetStringUTFChars(jpath, nullptr);
     if (!path) return JNI_FALSE;
     tsf *loaded = tsf_load_filename(path);
@@ -314,115 +314,115 @@ Java_com_sf2ensemble_synth_SynthBridge_nativeLoadBank(JNIEnv *env, jclass, jstri
     return JNI_TRUE;
 }
 
-JNIEXPORT jboolean JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeStart(JNIEnv *, jclass) {
+JNIEXPORT jboolean JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeStart(JNIEnv *, jclass) {
     if (g_stream) return JNI_TRUE;
     return openStream() ? JNI_TRUE : JNI_FALSE;
 }
 
-JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeStop(JNIEnv *, jclass) {
+JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeStop(JNIEnv *, jclass) {
     if (!g_stream) return;
     AAudioStream_requestStop(g_stream);
     AAudioStream_close(g_stream);
     g_stream = nullptr;
 }
 
-JNIEXPORT jboolean JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeIsRunning(JNIEnv *, jclass) {
+JNIEXPORT jboolean JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeIsRunning(JNIEnv *, jclass) {
     return g_stream ? JNI_TRUE : JNI_FALSE;
 }
 
-JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeNoteOn(JNIEnv *, jclass, jint ch,
+JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeNoteOn(JNIEnv *, jclass, jint ch,
                                                                           jint note, jint vel) {
     MidiEvent e{EV_NOTE_ON, ch & 15, note & 127, vel & 127, 0};
     pushEvent(e);
 }
 
-JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeNoteOff(JNIEnv *, jclass, jint ch,
+JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeNoteOff(JNIEnv *, jclass, jint ch,
                                                                            jint note) {
     MidiEvent e{EV_NOTE_OFF, ch & 15, note & 127, 0, 0};
     pushEvent(e);
 }
 
-JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeControlChange(JNIEnv *, jclass, jint ch,
+JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeControlChange(JNIEnv *, jclass, jint ch,
                                                                                  jint cc, jint value) {
     MidiEvent e{EV_CC, ch & 15, cc & 127, value & 127, 0};
     pushEvent(e);
 }
 
-JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeProgramChange(JNIEnv *, jclass, jint ch,
+JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeProgramChange(JNIEnv *, jclass, jint ch,
                                                                                  jint program, jint drum) {
     MidiEvent e{EV_PROGRAM, ch & 15, program & 127, drum ? 1 : 0, 0};
     pushEvent(e);
 }
 
-JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeBankSelect(JNIEnv *, jclass, jint ch,
+JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeBankSelect(JNIEnv *, jclass, jint ch,
                                                                               jint bank) {
     MidiEvent e{EV_BANK, ch & 15, bank & 0x7FFF, 0, 0};
     pushEvent(e);
 }
 
-JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativePitchBend(JNIEnv *, jclass, jint ch,
+JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativePitchBend(JNIEnv *, jclass, jint ch,
                                                                              jint value) {
     MidiEvent e{EV_PITCH, ch & 15, value & 0x3FFF, 0, 0};
     pushEvent(e);
 }
 
-JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeSetChannelVolume(JNIEnv *, jclass, jint ch,
+JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeSetChannelVolume(JNIEnv *, jclass, jint ch,
                                                                                     jfloat v) {
     MidiEvent e{EV_CH_VOLUME, ch & 15, 0, 0, v};
     pushEvent(e);
 }
 
-JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeSetChannelPan(JNIEnv *, jclass, jint ch,
+JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeSetChannelPan(JNIEnv *, jclass, jint ch,
                                                                                  jfloat pan01) {
     MidiEvent e{EV_CH_PAN, ch & 15, 0, 0, pan01};
     pushEvent(e);
 }
 
-JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeChannelSoundsOff(JNIEnv *, jclass, jint ch) {
+JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeChannelSoundsOff(JNIEnv *, jclass, jint ch) {
     MidiEvent e{EV_CH_SOUNDS_OFF, ch & 15, 0, 0, 0};
     pushEvent(e);
 }
 
-JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeAllNotesOff(JNIEnv *, jclass) {
+JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeAllNotesOff(JNIEnv *, jclass) {
     MidiEvent e{EV_ALL_NOTES_OFF, 0, 0, 0, 0};
     pushEvent(e);
 }
 
-JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeSetMasterVolume(JNIEnv *, jclass, jfloat v) {
+JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeSetMasterVolume(JNIEnv *, jclass, jfloat v) {
     g_master.store(v, std::memory_order_relaxed);
 }
 
-JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeSetReverb(JNIEnv *, jclass, jfloat wet) {
+JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeSetReverb(JNIEnv *, jclass, jfloat wet) {
     g_reverb.store(wet, std::memory_order_relaxed);
 }
 
-JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeSetVoiceCap(JNIEnv *, jclass, jint n) {
+JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeSetVoiceCap(JNIEnv *, jclass, jint n) {
     MidiEvent e{EV_VOICE_CAP, 0, n, 0, 0};
     pushEvent(e);
 }
 
-JNIEXPORT jint JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeGetVoices(JNIEnv *, jclass) {
+JNIEXPORT jint JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeGetVoices(JNIEnv *, jclass) {
     return g_voices.load(std::memory_order_relaxed);
 }
 
-JNIEXPORT jint JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeGetSampleRate(JNIEnv *, jclass) {
+JNIEXPORT jint JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeGetSampleRate(JNIEnv *, jclass) {
     return g_sampleRate.load(std::memory_order_relaxed);
 }
 
-JNIEXPORT jint JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeGetBufferFrames(JNIEnv *, jclass) {
+JNIEXPORT jint JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeGetBufferFrames(JNIEnv *, jclass) {
     return g_bufferFrames.load(std::memory_order_relaxed);
 }
 
-JNIEXPORT jint JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeGetBurstFrames(JNIEnv *, jclass) {
+JNIEXPORT jint JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeGetBurstFrames(JNIEnv *, jclass) {
     return g_framesPerBurst.load(std::memory_order_relaxed);
 }
 
-JNIEXPORT jint JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeGetPresetCount(JNIEnv *, jclass) {
+JNIEXPORT jint JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeGetPresetCount(JNIEnv *, jclass) {
     return g_synth ? tsf_get_presetcount(g_synth) : 0;
 }
 
 /** 返回 "名称|bank|program"（bank 为 MSB<<7|LSB），供 JS 侧构造音色列表 */
-JNIEXPORT jstring JNICALL Java_com_sf2ensemble_synth_SynthBridge_nativeGetPresetInfo(JNIEnv *env, jclass, jint index) {
+JNIEXPORT jstring JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeGetPresetInfo(JNIEnv *env, jclass, jint index) {
     if (!g_synth || index < 0 || index >= tsf_get_presetcount(g_synth)) return env->NewStringUTF("");
     const char *name = tsf_get_presetname(g_synth, index);
     const struct tsf_preset *p = &g_synth->presets[index];

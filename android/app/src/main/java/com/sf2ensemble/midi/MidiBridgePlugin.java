@@ -168,6 +168,8 @@ public class MidiBridgePlugin extends Plugin {
         port.connect(new MidiReceiver() {
             @Override
             public void onSend(byte[] msg, int offset, int count, long timestamp) {
+                // 原生合成可用时直接在这里发声，避免绕 WebView（显著降低延迟）
+                boolean played = com.sf2ensemble.synth.SynthBridgePlugin.deliver(key, msg, offset, count);
                 JSArray arr = new JSArray();
                 for (int i = offset; i < offset + count && i < msg.length; i++) {
                     arr.put(msg[i] & 0xff);
@@ -175,6 +177,7 @@ public class MidiBridgePlugin extends Plugin {
                 JSObject payload = new JSObject();
                 payload.put("id", key);
                 payload.put("data", arr);
+                payload.put("played", played);
                 notifyListeners("midiMessage", payload);
             }
         });
