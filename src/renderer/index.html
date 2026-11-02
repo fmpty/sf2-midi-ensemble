@@ -8,6 +8,14 @@
     <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+    <script>
+        (function () {
+            var w = window.innerWidth, h = window.innerHeight;
+            var tier = w < 600 ? 'phone' : w < 1024 ? 'tablet' : 'desktop';
+            document.documentElement.dataset.layout = tier;
+            document.documentElement.dataset.orient = h >= w ? 'portrait' : 'landscape';
+        })();
+    </script>
     <div id="start-overlay" class="overlay">
         <div class="overlay-box">
             <div class="overlay-logo">♫</div>

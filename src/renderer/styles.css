@@ -1,6 +1,7 @@
 :root {
     --bg: #0e1116;
     --bg-soft: #151a22;
+    --chrome-h: 0px;
     --panel: #1a212c;
     --panel-2: #141a24;
     --line: #263041;
@@ -80,6 +81,41 @@ select, input[type="text"] { background: #131923; border: 1px solid var(--line);
     background: var(--bg-soft); border-bottom: 1px solid var(--line);
     gap: 10px; flex: none;
 }
+
+/* Electron：顶栏兼标题栏，隐藏系统菜单栏 */
+html.electron {
+    --chrome-h: 36px;
+}
+html.electron .topbar {
+    min-height: var(--chrome-h);
+    padding-top: 4px;
+    padding-bottom: 4px;
+    -webkit-app-region: drag;
+}
+html.electron .topbar button,
+html.electron .topbar .status,
+html.electron .topbar .brand { -webkit-app-region: no-drag; }
+html.electron.platform-win32 .topbar {
+    padding-right: calc(138px + var(--safe-r));
+}
+html.electron.platform-darwin .topbar {
+    padding-left: calc(78px + var(--safe-l));
+}
+html.electron .brand-name { display: none; }
+html.electron .version { font-size: 11px; }
+html.electron .tabs { padding-top: 4px; padding-bottom: 4px; }
+html.electron .tab { padding-top: 6px; padding-bottom: 6px; min-height: 32px; }
+
+/* Android 沉浸全屏：内容进安全区 */
+html.native-app .topbar {
+    padding-top: calc(6px + env(safe-area-inset-top, 0px));
+}
+html.native-app.platform-android .statusbar {
+    padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px));
+}
+html.native-app.platform-android[data-layout="phone"][data-orient="portrait"] .tabs {
+    padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+}
 .brand { display: flex; align-items: center; gap: 8px; font-weight: 600; min-width: 0; }
 .logo { color: var(--accent-2); font-size: 20px; flex: none; }
 .brand-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -149,11 +185,64 @@ main { flex: 1; min-height: 0; display: flex; padding: 12px; padding-left: calc(
 .chip.off { opacity: .5; }
 
 .piano-wrap { flex: 1; min-height: 0; display: flex; align-items: flex-end; }
-.piano {
-    position: relative; width: 100%;
-    height: clamp(110px, 26vh, 240px);
-    display: flex; user-select: none; touch-action: none;
+
+/*
+ * 竖屏三排高度由 layout.js → --jianpu-total-h（宽/7×4.2×3+间距，且 ≤ slot 高）。
+ * 勿对 .piano.jianpu 使用 tablet/phone 的 .piano { height:… } 规则。
+ */
+.piano-wrap:has(.piano.jianpu) {
+    flex: 1 1 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    align-items: stretch;
+    overflow: hidden;
+}
+#pane-play .piano-hint,
+#pane-play .play-bar.bottom,
+#pane-play .play-tips {
+    flex: none;
+    position: relative;
+    z-index: 2;
+}
+.piano-wrap:has(.piano.jianpu) + .piano-hint {
+    margin-top: 8px;
+}
+html[data-orient="portrait"] #pane-play {
+    min-height: 0;
+    overflow: hidden;
+}
+
+.piano:not(.jianpu),
+.piano-bar {
+    position: relative;
+    width: 100%;
+    display: flex;
+    user-select: none;
+    touch-action: none;
     padding-bottom: 2px;
+}
+.piano:not(.jianpu) {
+    height: clamp(110px, 26vh, 240px);
+}
+html[data-orient="portrait"] .piano:not(.jianpu) { height: clamp(110px, 26vh, 240px); }
+
+.piano.jianpu {
+    --row-gap: 14px;
+    --bk-of-white: 0.58;
+    width: 100%;
+    flex: none;
+    height: var(--jianpu-total-h, auto);
+    max-height: var(--jianpu-slot-h, 100%);
+    display: grid;
+    grid-template-rows: repeat(3, minmax(0, 1fr));
+    gap: var(--row-gap);
+}
+.piano.jianpu > .piano-bar {
+    height: 100%;
+    min-height: 0;
+    --bw: calc(100% / 7 * var(--bk-of-white));
 }
 .pkey {
     position: relative; border-radius: 0 0 5px 5px; cursor: pointer;
@@ -161,14 +250,22 @@ main { flex: 1; min-height: 0; display: flex; padding: 12px; padding-left: calc(
     touch-action: none; -webkit-tap-highlight-color: transparent;
 }
 .pkey span { font-size: 9px; color: #6b7484; padding-bottom: 3px; pointer-events: none; }
-.pkey.white { flex: 1; background: linear-gradient(#f6f8fb, #d7dde6); border: 1px solid #b9c2ce; }
+.pkey.white {
+    flex: 1;
+    min-width: 0;
+    align-self: stretch;
+    background: linear-gradient(#f6f8fb, #d7dde6);
+    border: 1px solid #b9c2ce;
+}
 .pkey.white.active { background: linear-gradient(#9fd0ff, #6bb4f5); }
 .pkey.black {
     position: absolute; top: 0; width: var(--bw); height: 62%;
     background: linear-gradient(#2c3441, #12161d); border: 1px solid #000; z-index: 2; color: #fff;
     border-radius: 0 0 4px 4px;
 }
+.pkey.black span { color: #9aa3b0; font-size: 8px; }
 .pkey.black.active { background: linear-gradient(#3d7cc0, #1d4e86); }
+.pkey.black.active span { color: #dceeff; }
 .piano-hint { margin: 0; flex: none; }
 .play-tips { color: var(--muted); font-size: 11px; margin: 0; line-height: 1.6; flex: none; }
 
@@ -239,38 +336,87 @@ main { flex: 1; min-height: 0; display: flex; padding: 12px; padding-left: calc(
 .statusbar::-webkit-scrollbar { display: none; }
 .statusbar b { color: var(--text); font-weight: 600; }
 
-/* ---------------- 平板（≥760px 且横屏） ---------------- */
-@media (min-width: 760px) {
-    .piano { height: clamp(140px, 24vh, 260px); }
-    .device-list { grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); }
+/* ---------------- 桌面（Electron 默认 ≥1024） ---------------- */
+html[data-layout="desktop"] .piano:not(.jianpu) { height: clamp(140px, 24vh, 260px); }
+html[data-layout="desktop"] .device-list { grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); }
+
+/* ---------------- 平板（600–1023，含 Android 平板） ---------------- */
+html[data-layout="tablet"] .piano:not(.jianpu) { height: clamp(150px, 28vh, 300px); }
+html[data-layout="tablet"] .device-list { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+html[data-layout="tablet"] .version { display: none; }
+html[data-layout="tablet"] main { padding: 12px 16px; }
+html[data-layout="tablet"] .tab { min-height: 40px; }
+html[data-layout="tablet"][data-orient="landscape"] .device-list {
+    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+}
+html[data-layout="tablet"][data-orient="portrait"] #pane-more > .panel:not(.grow) { max-width: none; }
+
+/* ---------------- 手机（<600） ---------------- */
+html[data-layout="phone"] {
+    font-size: 14px;
+}
+html[data-layout="phone"] .brand-name,
+html[data-layout="phone"] .version { display: none; }
+html[data-layout="phone"] .topbar {
+    padding: 8px 12px;
+    padding-top: calc(8px + env(safe-area-inset-top, 0px));
+}
+html[data-layout="phone"] .tabs { padding: 6px 8px; gap: 2px; }
+html[data-layout="phone"] .tab { min-width: 56px; font-size: 12px; padding: 10px 6px; min-height: 44px; }
+html[data-layout="phone"] .tab .ico { font-size: 18px; }
+html[data-layout="phone"] main { padding: 10px; }
+html[data-layout="phone"] .piano:not(.jianpu) { height: clamp(128px, min(40vh, 42dvh), 260px); }
+html[data-layout="phone"] .device-list { grid-template-columns: 1fr; }
+html[data-layout="phone"] .row > label { width: 58px; }
+html[data-layout="phone"] .row .val { width: 42px; }
+html[data-layout="phone"] .play-tips { display: none; }
+html[data-layout="phone"] .statusbar { gap: 10px; font-size: 11px; }
+html[data-layout="phone"] .overlay-box h1 { font-size: 22px; }
+html[data-layout="phone"] .overlay-box .tip { font-size: 11px; }
+html[data-layout="phone"] .play-bar.bottom { flex-wrap: nowrap; }
+html[data-layout="phone"] .play-bar.bottom .slider.grow { min-width: 0; }
+html[data-layout="phone"] .statusbar .st-state { display: none; }
+
+/* 手机竖屏：底 Tab + 状态栏紧贴顶栏下（拇指区） */
+html[data-layout="phone"][data-orient="portrait"] .tabs {
+    order: 3;
+    border-top: 1px solid var(--line);
+    border-bottom: none;
+    padding-top: 8px;
+    padding-bottom: calc(8px + var(--safe-b));
+    background: #121821;
+    box-shadow: 0 -4px 24px rgba(0, 0, 0, .35);
+}
+html[data-layout="phone"][data-orient="portrait"] .tab .txt { display: none; }
+html[data-layout="phone"][data-orient="portrait"] main { order: 2; padding-bottom: 4px; }
+html[data-layout="phone"][data-orient="portrait"] .statusbar {
+    order: 1;
+    border-top: none;
+    border-bottom: 1px solid var(--line);
+    padding: 4px 12px;
+    padding-bottom: 4px;
 }
 
-/* ---------------- 手机 / 窄屏 ---------------- */
-@media (max-width: 759px) {
-    body { font-size: 14px; }
+/* 手机横屏：压缩顶栏，钢琴尽量占宽 */
+html[data-layout="phone"][data-orient="landscape"] .topbar { padding-top: 4px; padding-bottom: 4px; }
+html[data-layout="phone"][data-orient="landscape"] .tabs { padding: 4px 8px; }
+html[data-layout="phone"][data-orient="landscape"] .piano:not(.jianpu) { height: clamp(100px, 52vh, 200px); }
+html[data-layout="phone"][data-orient="landscape"] main { padding: 6px 10px; }
+html[data-layout="phone"][data-orient="landscape"] .play-tips { display: none; }
+html[data-layout="phone"][data-orient="landscape"] #pane-play .play-bar:first-child { display: none; }
+html[data-layout="phone"][data-orient="landscape"] .piano-hint { font-size: 11px; }
+
+/* ---------------- 触摸设备（Capacitor / 触屏） ---------------- */
+html[data-layout="phone"] button,
+html[data-layout="tablet"] button,
+body.touch-ui button { min-height: 40px; }
+html[data-layout="phone"] button.mini,
+html[data-layout="tablet"] button.mini,
+body.touch-ui button.mini { min-height: 36px; padding: 6px 12px; }
+body.touch-ui input[type="range"] { height: 32px; }
+body.touch-ui .chip { min-height: 36px; padding: 8px 14px; }
+
+/* 无 JS 时的 media 回退（首屏闪动前） */
+@media (max-width: 599px) {
     .brand-name, .version { display: none; }
-    .topbar { padding: 8px 12px; padding-top: calc(8px + env(safe-area-inset-top, 0px)); }
-    .tabs { padding: 6px 8px; gap: 2px; }
-    .tab { min-width: 60px; font-size: 12px; padding: 8px 6px; }
-    .tab .ico { font-size: 16px; }
-    main { padding: 10px; }
-    .piano { height: clamp(120px, 30vh, 220px); }
-    .device-list { grid-template-columns: 1fr; }
-    .row > label { width: 58px; }
-    .row .val { width: 42px; }
-    .play-tips { display: none; }
-    .statusbar { gap: 12px; font-size: 11px; }
-    .overlay-box h1 { font-size: 22px; }
-}
-
-/* 手机竖屏：底部分页栏（更符合拇指可达） */
-@media (max-width: 759px) and (orientation: portrait) {
-    .tabs {
-        order: 3;
-        border-top: 1px solid var(--line); border-bottom: none;
-        padding-bottom: calc(6px + var(--safe-b));
-        background: #121821;
-    }
-    main { order: 2; }
-    .statusbar { order: 1; border-top: none; border-bottom: 1px solid var(--line); padding: 4px 12px; }
 }

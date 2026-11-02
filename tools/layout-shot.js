@@ -16,33 +16,48 @@ app.whenReady().then(async () => {
     const win = BrowserWindow.getAllWindows()[0];
     if (!win) { console.log('no window'); app.quit(); return; }
     win.setResizable(true);
+    win.setMinimumSize(320, 480);
+    win.webContents.setZoomFactor(1);
     win.webContents.on('console-message', (e) => {
         if (e.level === 'error') console.log('[console error]', e.message);
     });
 
     const shots = [
-        ['pad-play', 1180, 760, 'play'],
-        ['pad-devices', 1180, 760, 'devices'],
-        ['pad-sound', 1180, 760, 'sound'],
-        ['pad-more', 1180, 760, 'more'],
-        ['phone-play', 400, 860, 'play'],
-        ['phone-devices', 400, 860, 'devices'],
-        ['phone-sound', 400, 860, 'sound'],
-        ['phone-more', 400, 860, 'more'],
+        ['desktop-play', 1180, 760, 'play'],
+        ['desktop-devices', 1180, 760, 'devices'],
+        ['tablet-port-play', 800, 1280, 'play'],
+        ['tablet-port-devices', 800, 1280, 'devices'],
+        ['tablet-land-play', 1280, 800, 'play'],
+        ['phone-port-play', 390, 844, 'play'],
+        ['phone-port-devices', 390, 844, 'devices'],
+        ['phone-land-play', 844, 390, 'play'],
     ];
+
+    const logLines = [];
 
     for (const [name, w, h, tab] of shots) {
         win.setContentSize(w, h);
-        await sleep(450);
-        await win.webContents.executeJavaScript(
-            `(() => { document.getElementById('start-overlay').classList.add('hidden');
-                      window.__ensemble.showTab('${tab}');
-                      window.__ensemble.renderPiano(); return 1; })()`
+        await sleep(500);
+        const meta = await win.webContents.executeJavaScript(
+            `(() => {
+                document.getElementById('start-overlay').classList.add('hidden');
+                window.__ensemble.showTab('${tab}');
+                window.__ensemble.renderPiano();
+                return {
+                    innerWidth: window.innerWidth,
+                    innerHeight: window.innerHeight,
+                    layout: document.documentElement.dataset.layout,
+                    orient: document.documentElement.dataset.orient,
+                };
+            })()`
         );
-        await sleep(450);
+        await sleep(350);
         const img = await win.webContents.capturePage();
         fs.writeFileSync(path.join(__dirname, `shot-${name}.png`), img.toPNG());
-        console.log('shot', name, img.getSize());
+        const line = `shot ${name} content=${w}x${h} inner=${meta.innerWidth}x${meta.innerHeight} layout=${meta.layout}/${meta.orient} capture=${img.getSize().width}x${img.getSize().height}`;
+        console.log(line);
+        logLines.push(line);
     }
+    fs.writeFileSync(path.join(__dirname, 'shot.log'), logLines.join('\n') + '\n');
     app.quit();
 });

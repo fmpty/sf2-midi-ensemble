@@ -61,7 +61,11 @@ async function persistStore() {
     }
 }
 
-function createMenu() {
+function createMenu(show) {
+    if (!show) {
+        Menu.setApplicationMenu(null);
+        return;
+    }
     const template = [
         {
             label: '文件',
@@ -101,13 +105,16 @@ async function pickSoundfonts() {
 }
 
 function createWindow() {
-    win = new BrowserWindow({
+    const platform = process.platform;
+    const useOverlay = platform === 'win32';
+    const opts = {
         width: 1360,
         height: 900,
         minWidth: 1080,
         minHeight: 700,
         backgroundColor: '#0e1116',
         title: 'SF2 MIDI Ensemble',
+        autoHideMenuBar: true,
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
@@ -115,7 +122,19 @@ function createWindow() {
             sandbox: false,
             backgroundThrottling: false,
         },
-    });
+    };
+    if (useOverlay) {
+        opts.titleBarStyle = 'hidden';
+        opts.titleBarOverlay = {
+            color: '#151a22',
+            symbolColor: '#e6edf6',
+            height: 36,
+        };
+    } else if (platform === 'darwin') {
+        opts.titleBarStyle = 'hiddenInset';
+    }
+    win = new BrowserWindow(opts);
+    if (app.isPackaged) win.setMenuBarVisibility(false);
 
     // Web MIDI（含蓝牙 MIDI / SysEx）权限
     const allow = (permission) => ['midi', 'midiSysex'].includes(permission);
@@ -127,7 +146,7 @@ function createWindow() {
 
 app.whenReady().then(async () => {
     await loadStore();
-    createMenu();
+    createMenu(!app.isPackaged);
     createWindow();
     app.on('activate', () => {
         if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -167,4 +186,5 @@ ipcMain.handle('app:info', () => ({
     platform: process.platform,
     userData: app.getPath('userData'),
     hasBuiltin: !!findBuiltinSoundfont(),
+    compactChrome: true,
 }));

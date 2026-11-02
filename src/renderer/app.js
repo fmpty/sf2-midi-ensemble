@@ -8,6 +8,7 @@ import { NativeMidiHub, isNativeMidiAvailable } from './native-midi.js';
 import { VirtualKeyboard } from './keyboard.js';
 import { GM_PROGRAMS, DRUM_NOTES, noteName, programLabel } from './gm.js';
 import { getBuiltinSoundfont, openSoundfont, loadSoundfontPaths, storeGet, storeSet, getInfo, isMobile, isElectron, keepAwake } from './platform.js';
+import { initLayout, tierFromWidth, syncJianpuPianoMetrics } from './layout.js';
 
 const VIRTUAL_KEY = 'virtual:keyboard';
 
@@ -362,11 +363,33 @@ function cssEscape(s) {
 const PIANO_START = 48;
 const PIANO_END = 84;
 const BLACK_KEYS = [1, 3, 6, 8, 10];
-/** 屏幕较窄时（手机竖屏）收窄到两个八度，保证琴键点得准 */
-function pianoRange() {
-    const narrow = typeof window !== 'undefined' && (window.innerWidth < 760);
+
+/** 竖屏：三排钢琴（与横屏同款琴键，仅叠成三行）；横屏：单条 */
+function pianoLayoutMode() {
+    if (typeof document === 'undefined') return 'keyboard';
+    return document.documentElement.dataset.orient === 'portrait' ? 'jianpu' : 'keyboard';
+}
+
+/** 竖屏三排：每排一个八度 C–B（上 C5 / 中 C4 / 下 C3） */
+const PORTRAIT_OCTAVES = [72, 60, 48];
+
+function pianoLayoutKey() {
+    if (pianoLayoutMode() === 'jianpu') return 'jianpu';
+    const [start, end] = pianoKeyboardRange();
+    return `kb-${start}-${end}`;
+}
+
+/** 横屏钢琴条音域 */
+function pianoKeyboardRange() {
+    const narrow = typeof window !== 'undefined' && window.innerWidth < 760;
     return narrow ? [48, 72] : [PIANO_START, PIANO_END];
 }
+
+/** @deprecated 保留旧名供外部调试 */
+function pianoRange() {
+    return pianoKeyboardRange();
+}
+
 /** pointerId -> { note, el, routeKey, channel }：支持多点触控与滑奏 */
 const pianoActive = new Map();
 let pianoBound = false;
@@ -498,11 +521,11 @@ function bindPiano() {
     }
     piano.addEventListener('contextmenu', (e) => e.preventDefault());
     window.addEventListener('blur', releaseAllPiano);
-    let lastRange = pianoRange().join('-');
+    let lastLayoutKey = pianoLayoutKey();
     const onResize = () => {
-        const now = pianoRange().join('-');
-        if (now !== lastRange) {
-            lastRange = now;
+        const now = pianoLayoutKey();
+        if (now !== lastLayoutKey) {
+            lastLayoutKey = now;
             renderPiano();
         }
     };
@@ -510,40 +533,67 @@ function bindPiano() {
     window.addEventListener('orientationchange', () => setTimeout(onResize, 200));
 }
 
-let pianoRangeKey = '';
+let pianoLayoutCache = '';
+
+/** 与横屏完全相同的琴键 DOM（白/黑键 + 底部音名角标） */
+function appendPianoKeys(container, start, end) {
+    const whites = [];
+    for (let n = start; n <= end; n++) if (!BLACK_KEYS.includes(n % 12)) whites.push(n);
+    const w = 100 / whites.length;
+    let whiteIndex = 0;
+    for (let n = start; n <= end; n++) {
+        const isBlack = BLACK_KEYS.includes(n % 12);
+        const key = document.createElement('div');
+        key.className = `pkey ${isBlack ? 'black' : 'white'}`;
+        key.dataset.note = n;
+        key.title = `${noteName(n)}${DRUM_NOTES[n] ? ' · ' + DRUM_NOTES[n] : ''}`;
+        if (isBlack) {
+            key.style.left = `calc(${whiteIndex * w}% - var(--bw) / 2)`;
+        } else {
+            whiteIndex++;
+        }
+        key.innerHTML = `<span>${DRUM_NOTES[n] ? '' : noteName(n)}</span>`;
+        container.appendChild(key);
+    }
+}
+
+function renderPianoKeyboard(piano, start, end) {
+    piano.classList.remove('jianpu');
+    piano.innerHTML = '';
+    appendPianoKeys(piano, start, end);
+}
+
+function renderPianoJianpu(piano) {
+    piano.classList.add('jianpu');
+    piano.innerHTML = '';
+    for (const start of PORTRAIT_OCTAVES) {
+        const strip = document.createElement('div');
+        strip.className = 'piano-bar';
+        appendPianoKeys(strip, start, start + 11);
+        piano.appendChild(strip);
+    }
+}
 
 function renderPiano() {
     const piano = dom.piano;
     const route = currentPianoRoute();
-    const [start, end] = pianoRange();
-    const rangeKey = `${start}-${end}`;
-    // 设备列表变化会频繁触发重绘：琴键布局未变时只更新提示，避免打断正在按住的音
-    if (rangeKey !== pianoRangeKey) {
+    const layoutKey = pianoLayoutKey();
+    if (layoutKey !== pianoLayoutCache) {
         releaseAllPiano();
-        pianoRangeKey = rangeKey;
-        piano.innerHTML = '';
-        const whites = [];
-        for (let n = start; n <= end; n++) if (!BLACK_KEYS.includes(n % 12)) whites.push(n);
-        const w = 100 / whites.length;
-        let whiteIndex = 0;
-        for (let n = start; n <= end; n++) {
-            const isBlack = BLACK_KEYS.includes(n % 12);
-            const key = document.createElement('div');
-            key.className = `pkey ${isBlack ? 'black' : 'white'}`;
-            key.dataset.note = n;
-            key.title = `${noteName(n)}${DRUM_NOTES[n] ? ' · ' + DRUM_NOTES[n] : ''}`;
-            if (isBlack) {
-                key.style.left = `calc(${whiteIndex * w}% - var(--bw) / 2)`;
-            } else {
-                whiteIndex++;
-            }
-            key.innerHTML = `<span>${DRUM_NOTES[n] ? '' : noteName(n)}</span>`;
-            piano.appendChild(key);
+        pianoLayoutCache = layoutKey;
+        if (pianoLayoutMode() === 'jianpu') {
+            renderPianoJianpu(piano);
+        } else {
+            const [start, end] = pianoKeyboardRange();
+            renderPianoKeyboard(piano, start, end);
         }
         bindPiano();
     }
     renderTargetChips();
     dom.pianoInfo.textContent = route ? `当前目标：${route.label || route.name}` : '请先在「手柄」页选择一个设备';
+    if (pianoLayoutMode() === 'jianpu') {
+        requestAnimationFrame(() => syncJianpuPianoMetrics());
+    }
 }
 
 /* ------------------------------ 演奏目标快捷切换 ------------------------------ */
@@ -880,9 +930,15 @@ async function main() {
     });
 
     await loadConfig();
-    // 手机 CPU 有限，复音过多会导致音频线程欠载，间接放大延迟与卡顿
-    if (isMobile() && !state.master.tuned) {
-        if (state.master.voiceCap > 96) state.master.voiceCap = 64;
+    initLayout(() => renderPiano());
+    // 手机 / 平板 CPU 有限，复音过多会导致欠载与卡顿
+    if (!state.master.tuned) {
+        const tier = tierFromWidth(window.innerWidth);
+        if (tier === 'phone' || isMobile()) {
+            if (state.master.voiceCap > 96) state.master.voiceCap = 64;
+        } else if (tier === 'tablet' && state.master.voiceCap > 128) {
+            state.master.voiceCap = 96;
+        }
         state.master.tuned = true;
     }
     dom.masterVolume.value = state.master.volume;
@@ -894,14 +950,21 @@ async function main() {
 
     try {
         const info = await getInfo();
+        if (isElectron()) {
+            document.documentElement.classList.add('electron', `platform-${info.platform}`);
+        }
+        const cap = typeof window !== 'undefined' ? window.Capacitor : null;
+        if (cap && typeof cap.isNativePlatform === 'function' && cap.isNativePlatform()) {
+            const plat = typeof cap.getPlatform === 'function' ? cap.getPlatform() : 'native';
+            document.documentElement.classList.add('native-app', `platform-${plat}`);
+        }
         dom.appVersion.textContent = `v${info.version} · ${info.platform}`;
         if (!info.hasBuiltin) log('未检测到内置音源（assets/soundfonts），启动时可手动载入 SF2', 'warn');
         if (!isElectron()) {
             if (info.secureContext === false) log('当前非安全上下文（需 HTTPS 或 localhost），Web MIDI 不可用', 'warn');
             if (!info.webMidi) log('当前浏览器不支持 Web MIDI（如 iOS Safari），可使用电脑键盘/屏幕键盘演奏', 'warn');
         }
-        if (isMobile()) {
-            document.body.classList.add('mobile');
+        if (isMobile() || tierFromWidth(window.innerWidth) !== 'desktop') {
             await keepAwake(true);
         }
     } catch (e) {

@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "activeHostId": "3753ab2a17083d0f",
+  "hosts": [
+    {
+      "id": "3753ab2a17083d0f",
+      "name": "SF2 MIDI Ensemble（F5 桌面 exe F6 Android APK）",
+      "ssh": {
+        "host": "",
+        "port": 22,
+        "username": "tom1",
+        "privateKeyPath": "c:\\Users\\jinlv.tong\\.ssh\\id_rsa",
+        "passphrase": ""
+      },
+      "remoteBasePath": "D:/users/tjl",
+      "runCommand": ".vscode/build_local.bat",
+      "localCommand": ".vscode/build_android.bat",
+      "localCommand1": ""
+    }
+  ]
+}

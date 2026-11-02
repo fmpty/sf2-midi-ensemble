@@ -55,7 +55,9 @@ function syncAndroid() {
     copyFile(path.join(MOBILE, 'android', 'SynthBridgePlugin.java'),
         path.join(ROOT, 'android', 'app', 'src', 'main', 'java', 'com', 'sf2ensemble', 'synth', 'SynthBridgePlugin.java'));
     patchAndroidBuild();
-    patchMainActivity();
+    copyFile(path.join(MOBILE, 'android', 'MainActivity.java'),
+        path.join(ROOT, 'android', 'app', 'src', 'main', 'java', 'com', 'sf2', 'ensemble', 'MainActivity.java'));
+    patchAndroidStyles();
     // 使用 Java 实现（app 模块未启用 Kotlin 插件，.kt 不会被编译）
     const legacyKt = path.join(path.dirname(ktDest), 'MidiBridgePlugin.kt');
     if (fs.existsSync(legacyKt)) {
@@ -76,37 +78,28 @@ function syncAndroid() {
     }
 }
 
-/** Capacitor 不会自动注册原生插件：在 MainActivity 里显式注册 MidiBridge / SynthBridge */
-function patchMainActivity() {
-    const main = path.join(ROOT, 'android', 'app', 'src', 'main', 'java', 'com', 'sf2', 'ensemble', 'MainActivity.java');
-    if (!fs.existsSync(main)) {
-        console.log('  未找到 MainActivity.java');
+/** 透明系统栏 + 无 ActionBar，配合 MainActivity 沉浸全屏 */
+function patchAndroidStyles() {
+    const styles = path.join(ROOT, 'android', 'app', 'src', 'main', 'res', 'values', 'styles.xml');
+    if (!fs.existsSync(styles)) return;
+    let xml = fs.readFileSync(styles, 'utf8');
+    const immersiveItems = `
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="28">shortEdges</item>`;
+    if (xml.includes('navigationBarColor')) {
+        console.log('  Android styles 已含沉浸配置');
         return;
     }
-    const text = fs.readFileSync(main, 'utf8');
-    if (text.includes('registerPlugin(')) {
-        console.log('  MainActivity 已注册插件');
-        return;
-    }
-    const pkg = (text.match(/package\s+([\w.]+);/) || [])[1] || 'com.sf2.ensemble';
-    const content = `package ${pkg};
-
-import android.os.Bundle;
-
-import com.getcapacitor.BridgeActivity;
-import com.sf2ensemble.midi.MidiBridgePlugin;
-import com.sf2ensemble.synth.SynthBridgePlugin;
-
-public class MainActivity extends BridgeActivity {
-    @Override
-    public void onCreate(Bundle savedInstanceState) {
-        registerPlugin(MidiBridgePlugin.class);
-        registerPlugin(SynthBridgePlugin.class);
-        super.onCreate(savedInstanceState);
-    }
-}
-`;
-    writeIfChanged(main, content);
+    xml = xml.replace(
+        '<resources>',
+        '<resources xmlns:tools="http://schemas.android.com/tools">',
+    );
+    xml = xml.replace(
+        /(<style name="AppTheme.NoActionBar" parent="Theme.AppCompat.DayNight.NoActionBar">\s*\n)/,
+        `$1${immersiveItems}\n`,
+    );
+    writeIfChanged(styles, xml);
 }
 
 /** 给 app 模块加上 NDK 构建（CMake）并把 minSdk 提到 28（AAudio usage/contentType 要求） */
