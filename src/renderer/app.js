@@ -593,6 +593,8 @@ function pianoRange() {
 
 /** pointerId -> { note, el, routeKey, channel }：支持多点触控与滑奏 */
 const pianoActive = new Map();
+/** pointerId -> 滑奏延迟 noteOff 的 timer（抬手时需全部 flush，避免余音） */
+const pianoGlidePending = new Map();
 let pianoBound = false;
 
 function ensureVirtualRoute() {
@@ -620,6 +622,34 @@ function glideNoteMs() {
     return engine?.native && nativePianoBridge() ? 28 : 70;
 }
 
+function flushGlidePending(pointerId, includeCurrent = null) {
+    const list = pianoGlidePending.get(pointerId);
+    if (list) {
+        for (const t of list) clearTimeout(t.id);
+        pianoGlidePending.delete(pointerId);
+        for (const t of list) {
+            try { engine.noteOff(t.channel, t.note); } catch { /* 忽略 */ }
+        }
+    }
+    if (includeCurrent) {
+        try { engine.noteOff(includeCurrent.channel, includeCurrent.note); } catch { /* 忽略 */ }
+    }
+}
+
+function scheduleGlideNoteOff(pointerId, channel, note) {
+    const id = setTimeout(() => {
+        const list = pianoGlidePending.get(pointerId);
+        if (list) {
+            const i = list.findIndex((t) => t.id === id);
+            if (i >= 0) list.splice(i, 1);
+            if (!list.length) pianoGlidePending.delete(pointerId);
+        }
+        try { engine.noteOff(channel, note); } catch { /* 忽略 */ }
+    }, glideNoteMs());
+    if (!pianoGlidePending.has(pointerId)) pianoGlidePending.set(pointerId, []);
+    pianoGlidePending.get(pointerId).push({ id, channel, note });
+}
+
 function pianoPress(pointerId, keyEl, velocity = 100) {
     if (!keyEl) return;
     if (!engine.started) {
@@ -633,6 +663,8 @@ function pianoPress(pointerId, keyEl, velocity = 100) {
     if (prev && prev.el === keyEl) return;
     if (prev) pianoRelease(pointerId, true); // 滑奏换键：延迟一点再停，保证前一个音听得到
     const note = Number(keyEl.dataset.note);
+    // 快速滑回同一音高时会叠第二层 noteOn，旧 noteOff 又被跳过 → 余音嗡嗡
+    engine.noteOff(route.channel, note);
     engine.noteOn(route.channel, note, velocity);
     keyEl.classList.add('active');
     pianoActive.set(pointerId, { note, el: keyEl, routeKey: route.key, channel: route.channel });
@@ -644,17 +676,12 @@ function pianoRelease(pointerId, glide = false) {
     if (!a) return;
     pianoActive.delete(pointerId);
     a.el.classList.remove('active');
-    const finish = () => {
-        // 手指/鼠标又滑回同一个音时，不要把它掐掉
-        const cur = pianoActive.get(pointerId);
-        if (cur && cur.note === a.note && cur.channel === a.channel) return;
-        engine.noteOff(a.channel, a.note);
-    };
-    if (glide) setTimeout(finish, glideNoteMs());
-    else finish();
+    if (glide) scheduleGlideNoteOff(pointerId, a.channel, a.note);
+    else flushGlidePending(pointerId, a);
 }
 
 function releaseAllPiano() {
+    for (const id of [...pianoGlidePending.keys()]) flushGlidePending(id);
     for (const id of [...pianoActive.keys()]) pianoRelease(id);
 }
 
@@ -720,10 +747,14 @@ function bindPiano() {
         piano.addEventListener(type, (e) => {
             pianoLastPoint.delete(e.pointerId);
             pianoRelease(e.pointerId);
+            if (pianoGlidePending.has(e.pointerId)) flushGlidePending(e.pointerId);
         });
     }
     piano.addEventListener('contextmenu', (e) => e.preventDefault());
     window.addEventListener('blur', releaseAllPiano);
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') releaseAllPiano();
+    });
     let lastLayoutKey = pianoLayoutKey();
     const onResize = () => {
         const now = pianoLayoutKey();
