@@ -40,6 +40,8 @@ export function isBluetoothMidiEntry(dev) {
 /** 系统已识别或正在连接中的 MIDI 设备（含端口尚未就绪） */
 export function isMidiDeviceOnline(dev) {
     if (dev.connected === false) return false;
+    if (dev.connection === 'open') return true;
+    if (dev.state === 'connected') return true;
     if (dev.state === 'disconnected') return false;
     return true;
 }

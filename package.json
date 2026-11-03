@@ -18,6 +18,7 @@
     "mobile:ios": "npm run mobile:sync && npx cap open ios"
   },
   "dependencies": {
+    "@julusian/midi": "^3.6.1",
     "spessasynth_lib": "^4.4.2"
   },
   "devDependencies": {
@@ -41,6 +42,10 @@
       "package.json"
     ],
     "asar": true,
+    "asarUnpack": [
+      "node_modules/@julusian/midi/**",
+      "node_modules/@julusian/rtmidi/**"
+    ],
     "disableAsarIntegrity": true,
     "mac": {
       "category": "public.app-category.music",

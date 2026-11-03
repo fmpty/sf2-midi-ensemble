@@ -5,6 +5,12 @@ const { app, BrowserWindow, ipcMain, dialog, session, Menu } = require('electron
 const path = require('node:path');
 const fs = require('node:fs');
 const fsp = require('node:fs/promises');
+const midiBridge = require('./midi-bridge');
+
+/** Windows 蓝牙 MIDI 多走 WinRT/UWP，Chromium 需启用 WinRT MIDI 管理器 */
+if (process.platform === 'win32') {
+    app.commandLine.appendSwitch('enable-features', 'MidiManagerWinrt');
+}
 
 const ROOT = path.join(__dirname, '..', '..');
 const RENDERER_DIR = path.join(ROOT, 'src', 'renderer');
@@ -154,7 +160,12 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
+    midiBridge.closeAll();
     if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+    midiBridge.closeAll();
 });
 
 ipcMain.handle('app:processor-code', () => processorCode());
@@ -187,4 +198,17 @@ ipcMain.handle('app:info', () => ({
     userData: app.getPath('userData'),
     hasBuiltin: !!findBuiltinSoundfont(),
     compactChrome: true,
+    desktopMidi: process.platform === 'win32' && midiBridge.supported(),
 }));
+
+ipcMain.handle('app:midi-list', () => midiBridge.listDevices());
+
+ipcMain.handle('app:midi-open-all', () => {
+    if (!win || win.isDestroyed()) return midiBridge.listDevices();
+    return midiBridge.openAll(win.webContents);
+});
+
+ipcMain.handle('app:midi-close-all', () => {
+    midiBridge.closeAll();
+    return true;
+});

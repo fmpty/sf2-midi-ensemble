@@ -23,8 +23,14 @@ export class MidiHub {
         return typeof navigator !== 'undefined' && !!navigator.requestMIDIAccess;
     }
 
-    async connect() {
+    async connect(options = {}) {
         if (!this.available) throw new Error('当前运行环境不支持 Web MIDI API');
+        const force = options.force === true;
+        if (this.access && !force) {
+            await this.probeInputs();
+            this.refresh();
+            return true;
+        }
         let access = null;
         let lastError = null;
         for (const opts of [{ sysex: true }, { sysex: false }]) {
@@ -38,30 +44,49 @@ export class MidiHub {
         }
         if (!access) throw lastError || new Error('MIDI 设备访问被拒绝');
         this.access = access;
+        this.bound.clear();
         access.onstatechange = () => this.refresh();
+        await this.probeInputs();
         this.refresh();
         return true;
     }
 
-    rescan() {
-        if (!this.access) return;
+    /** 用户点「刷新」时调用：Windows 上新配对的蓝牙 MIDI 常需再次 requestMIDIAccess */
+    async rescan() {
+        await this.connect({ force: true });
+        await new Promise((r) => setTimeout(r, 400));
+        await this.probeInputs();
         this.refresh();
+        if (this.devices.length === 0) {
+            await new Promise((r) => setTimeout(r, 800));
+            await this.probeInputs();
+            this.refresh();
+        }
+    }
+
+    async probeInputs() {
+        if (!this.access) return;
+        const opens = [];
+        for (const input of this.access.inputs.values()) {
+            if (typeof input.open === 'function') {
+                opens.push(Promise.resolve(input.open()).catch(() => {}));
+            }
+        }
+        if (opens.length) await Promise.all(opens);
     }
 
     refresh() {
+        if (!this.access) return;
         const list = [];
         for (const input of this.access.inputs.values()) {
-            // 蓝牙 MIDI 设备往往处于 disconnected 状态，尝试打开以触发连接
-            if (input.state === 'disconnected' && typeof input.open === 'function') {
-                input.open().catch(() => {});
-            }
+            const idStr = String(input.id || '');
             const dev = {
                 id: input.id,
                 name: input.name || input.id,
                 manufacturer: input.manufacturer || '',
                 state: input.state,
                 connection: input.connection || 'closed',
-                guessBluetooth: BLE_HINTS.test(`${input.name || ''} ${input.manufacturer || ''}`),
+                guessBluetooth: BLE_HINTS.test(`${input.name || ''} ${input.manufacturer || ''} ${idStr}`),
             };
             this.bind(input);
             list.push(dev);
@@ -74,6 +99,17 @@ export class MidiHub {
         if (this.bound.get(input.id) === input) return;
         this.bound.set(input.id, input);
         input.onmidimessage = (e) => this.handle(input.id, e.data);
+    }
+
+    /** 释放 Web MIDI 输入占用（Windows 上与 WinMM 互斥时使用） */
+    releaseInputs() {
+        for (const input of this.bound.values()) {
+            input.onmidimessage = null;
+            if (typeof input.close === 'function') {
+                try { input.close(); } catch { /* 忽略 */ }
+            }
+        }
+        this.bound.clear();
     }
 
     handle(deviceId, data) {

@@ -11,4 +11,12 @@ contextBridge.exposeInMainWorld('api', {
     storeGet: (key) => ipcRenderer.invoke('app:store-get', key),
     storeSet: (key, value) => ipcRenderer.invoke('app:store-set', key, value),
     getInfo: () => ipcRenderer.invoke('app:info'),
+    midiListDevices: () => ipcRenderer.invoke('app:midi-list'),
+    midiOpenAll: () => ipcRenderer.invoke('app:midi-open-all'),
+    midiCloseAll: () => ipcRenderer.invoke('app:midi-close-all'),
+    onMidiBytes: (handler) => {
+        const listener = (_event, payload) => handler(payload);
+        ipcRenderer.on('app:midi-bytes', listener);
+        return () => ipcRenderer.removeListener('app:midi-bytes', listener);
+    },
 });

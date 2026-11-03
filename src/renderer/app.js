@@ -2,8 +2,9 @@
  * 应用主逻辑：界面渲染、设备-乐器映射、配置持久化。
  */
 import { NativeSynthEngine, isNativeSynthAvailable } from './native-synth.js';
-import { MidiHub } from './midi.js';
+import { MidiHub, describeDevice } from './midi.js';
 import { NativeMidiHub, isNativeMidiAvailable } from './native-midi.js';
+import { ElectronMidiHub, isElectronDesktopMidiAvailable } from './electron-midi.js';
 import { VirtualKeyboard } from './keyboard.js';
 import {
     GM_PROGRAMS, drumKitChinese, noteName, noteNameOnKey, presetDisplayName, programLabel,
@@ -62,7 +63,13 @@ async function initRuntime() {
         engine = await createWebSynthEngine();
     }
     MAX_CHANNELS = engine.maxChannels || 32;
-    hub = isNativeMidiAvailable() ? new NativeMidiHub(engine) : new MidiHub(engine);
+    if (isNativeMidiAvailable()) {
+        hub = new NativeMidiHub(engine);
+    } else if (isElectron() && isElectronDesktopMidiAvailable()) {
+        hub = new ElectronMidiHub(engine);
+    } else {
+        hub = new MidiHub(engine);
+    }
     vkb = new VirtualKeyboard(engine);
 }
 
@@ -283,9 +290,23 @@ function resolveRouteForDeviceId(deviceId) {
     for (const r of Object.values(state.routes)) {
         if (r.kind === 'midi' && r.deviceId === id) return r;
     }
+    if (id.startsWith('electron-midi:')) {
+        const idx = id.slice('electron-midi:'.length);
+        for (const r of Object.values(state.routes)) {
+            if (r.kind === 'midi' && String(r.deviceId).startsWith('electron-midi:') && String(r.deviceId).endsWith(`:${idx}`)) return r;
+        }
+    }
     const mac = macFromDeviceId(id);
     if (mac) return findMidiRouteByMac(mac);
-    return state.routes[`midi:${id}`] || state.routes[`midi:mac:${mac}`] || null;
+    const byKey = state.routes[`midi:${id}`] || state.routes[`midi:mac:${mac}`];
+    if (byKey) return byKey;
+    const hit = hub?.devices?.find((d) => d.id === id);
+    if (hit?.name) {
+        for (const r of Object.values(state.routes)) {
+            if (r.kind === 'midi' && r.name === hit.name) return r;
+        }
+    }
+    return null;
 }
 
 /* ------------------------------ 界面渲染 ------------------------------ */
@@ -1082,12 +1103,37 @@ async function rescanMidiDevices() {
         btn.textContent = '正在读取系统设备…';
     }
     try {
-        if (!state.midiReady) await connectMidi().catch(() => {});
+        if (!hub.available) {
+            log('当前环境不支持 Web MIDI（PC 请使用本应用安装版或 Chrome/Edge）', 'error');
+            return;
+        }
+        if (!engine.started) {
+            log('请先点击「启动音频引擎」，再刷新 MIDI 设备', 'warn');
+        }
         await hub.rescan();
-        syncDevices(hub.devices, { immediate: true, markOfflineWhenEmpty: true });
-        log(hub.devices.length ? `已刷新，当前 ${hub.devices.length} 个 MIDI 设备` : '未发现 MIDI 设备', hub.devices.length ? 'ok' : 'warn');
+        state.midiReady = true;
+        syncDevices(hub.devices, { immediate: true });
+        const n = hub.devices.length;
+        if (isElectronDesktopMidiAvailable()) {
+            try {
+                const rt = await window.api.midiListDevices();
+                log(`系统 MIDI 输入端口（WinMM）：${rt.length} 个`, rt.length ? 'ok' : 'info');
+            } catch { /* 忽略 */ }
+        }
+        if (n) {
+            log(`已刷新，当前 ${n} 个 MIDI 设备`, 'ok');
+            for (const d of hub.devices) log(`  · ${describeDevice(d)} · ${d.state || '?'}`, 'info');
+        } else if (isElectron()) {
+            log('未发现 MIDI 设备。Windows：确认蓝牙里已连接；若系统有设备但此处仍为空，可安装 KORG BLE-MIDI 驱动或 Microsoft Store 的「MIDIberry」桥接后再刷新', 'warn');
+        } else {
+            log('未发现 MIDI 设备', 'warn');
+        }
     } catch (e) {
+        state.midiReady = false;
         log(`刷新失败：${e.message}`, 'error');
+        if (isElectron()) {
+            log('若从未授权 MIDI，请先点「启动音频引擎」并在系统弹窗中选择允许', 'info');
+        }
     } finally {
         if (btn) {
             btn.disabled = false;
@@ -1253,6 +1299,7 @@ async function main() {
         }
         dom.appVersion.textContent = info.version ? `v${info.version}` : '';
         if (!info.hasBuiltin) log('未检测到内置音源（assets/soundfonts），启动时可手动载入 SF2', 'warn');
+        if (info.desktopMidi) log('Windows 桌面 MIDI：使用主进程端口枚举（Web MIDI 蓝牙常为空时仍可能列出设备）', 'info');
         if (!isElectron()) {
             if (info.secureContext === false) log('当前非安全上下文（需 HTTPS 或 localhost），Web MIDI 不可用', 'warn');
             if (!info.webMidi) log('当前浏览器不支持 Web MIDI（如 iOS Safari），可使用电脑键盘/屏幕键盘演奏', 'warn');
@@ -1267,10 +1314,12 @@ async function main() {
     // 尚未连上设备时也渲染已保存的路由
     syncDevices([]);
     document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState !== 'visible' || !state.midiReady || !isNativeMidiAvailable()) return;
-        hub.refresh()
-            .then(() => syncDevices(hub.devices, { immediate: true }))
-            .catch(() => {});
+        if (document.visibilityState !== 'visible' || !state.midiReady) return;
+        if (isNativeMidiAvailable() || isElectronDesktopMidiAvailable()) {
+            Promise.resolve(hub.refresh())
+                .then(() => syncDevices(hub.devices, { immediate: true }))
+                .catch(() => {});
+        }
     });
     setInterval(updateStatus, 500);
     // 便于调试 / 自动化测试
