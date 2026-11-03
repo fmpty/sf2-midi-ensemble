@@ -6,7 +6,7 @@
  *
  * 对外接口与 SynthEngine 保持一致，界面与路由逻辑无需区分。
  */
-import { nativeSynthPlugin } from './platform.js';
+import { nativeSynthPlugin, nativePianoBridge } from './platform.js';
 
 /** TinySoundFont 单实例为 16 个 MIDI 通道 */
 export const NATIVE_CHANNELS = 16;
@@ -51,7 +51,7 @@ export class NativeSynthEngine {
         if (fn) fn(payload);
     }
 
-    /** 顶栏展示：单 burst 周期（更接近体感），非整段 AAudio 队列 */
+    /** 顶栏：HAL burst 周期（随设备变化），非整段 AAudio 队列 */
     get latencyMs() {
         const rate = this.sampleRate || 48000;
         if (this.burstFrames > 0 && rate > 0) {
@@ -60,9 +60,13 @@ export class NativeSynthEngine {
         return this.bufferMs || 0;
     }
 
-    /** 实际输出队列长度（平板常比 burst 大，旧版顶栏误显示此值） */
+    /** 实际 AAudio 输出队列长度 */
     get outputBufferMs() {
         return this.bufferMs || 0;
+    }
+
+    get burstMs() {
+        return this.latencyMs;
     }
 
     get latencyInfo() {
@@ -120,7 +124,10 @@ export class NativeSynthEngine {
             const info = await p.getInfo();
             this.voiceCount = info.voices || 0;
             this.running = !!info.running;
-            this.bufferMs = info.bufferMs || this.bufferMs;
+            if (info.sampleRate) this.sampleRate = info.sampleRate;
+            if (info.burstFrames) this.burstFrames = info.burstFrames;
+            if (info.bufferFrames) this.bufferFrames = info.bufferFrames;
+            this.bufferMs = info.bufferMs ?? this.bufferMs;
         } catch {
             /* 忽略 */
         }
@@ -253,13 +260,32 @@ export class NativeSynthEngine {
     /* ------------------------------ 演奏 ------------------------------ */
 
     noteOn(channel, note, velocity) {
+        const ch = clampCh(channel);
+        const n = note | 0;
+        const vel = velocity | 0;
+        const fast = nativePianoBridge();
+        if (fast) {
+            try {
+                fast.noteOn(ch, n, vel);
+                return;
+            } catch { /* 回退 Capacitor */ }
+        }
         const p = nativeSynthPlugin();
-        if (p) p.noteOn({ channel: clampCh(channel), note: note | 0, velocity: velocity | 0 }).catch(() => {});
+        if (p) p.noteOn({ channel: ch, note: n, velocity: vel }).catch(() => {});
     }
 
     noteOff(channel, note) {
+        const ch = clampCh(channel);
+        const n = note | 0;
+        const fast = nativePianoBridge();
+        if (fast) {
+            try {
+                fast.noteOff(ch, n);
+                return;
+            } catch { /* 回退 */ }
+        }
         const p = nativeSynthPlugin();
-        if (p) p.noteOff({ channel: clampCh(channel), note: note | 0 }).catch(() => {});
+        if (p) p.noteOff({ channel: ch, note: n }).catch(() => {});
     }
 
     /** 转发原始 MIDI 消息（键盘/滑条等场景使用） */

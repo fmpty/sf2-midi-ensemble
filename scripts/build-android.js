@@ -126,6 +126,7 @@ function prepareAndroidProject() {
     const args = [
         path.join(androidDir, 'gradlew.bat'),
         'assembleDebug',
+        '--no-problems-report',
         '--init-script', path.join(ROOT, 'scripts', 'gradle-mirrors.gradle'),
     ];
     const toolOpts = '-Dfile.encoding=UTF-8 -Duser.language=en -Duser.country=US';
@@ -142,8 +143,14 @@ function prepareAndroidProject() {
         },
     });
     const apk = path.join(androidDir, 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk');
-    if (ok && fs.existsSync(apk)) {
+    const apkOk = fs.existsSync(apk);
+    if (ok && apkOk) {
         console.log(`\nAPK 构建成功：${path.relative(ROOT, apk)}  (${(fs.statSync(apk).size / 1048576).toFixed(1)} MB)`);
+    } else if (!ok && apkOk) {
+        console.warn(
+            '\nGradle 退出码非 0，但 debug APK 已存在（常见于 problems-report.html 被占用）。',
+        );
+        console.log(`APK：${path.relative(ROOT, apk)}  (${(fs.statSync(apk).size / 1048576).toFixed(1)} MB)`);
     } else if (ok) {
         console.log('\nGradle 构建完成，但未找到预期的 APK 输出。');
     } else {

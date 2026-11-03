@@ -55,8 +55,9 @@ function syncAndroid() {
     copyFile(path.join(MOBILE, 'android', 'SynthBridgePlugin.java'),
         path.join(ROOT, 'android', 'app', 'src', 'main', 'java', 'com', 'sf2ensemble', 'synth', 'SynthBridgePlugin.java'));
     patchAndroidBuild();
-    copyFile(path.join(MOBILE, 'android', 'MainActivity.java'),
-        path.join(ROOT, 'android', 'app', 'src', 'main', 'java', 'com', 'sf2', 'ensemble', 'MainActivity.java'));
+    const ensembleDir = path.join(ROOT, 'android', 'app', 'src', 'main', 'java', 'com', 'sf2', 'ensemble');
+    copyFile(path.join(MOBILE, 'android', 'MainActivity.java'), path.join(ensembleDir, 'MainActivity.java'));
+    copyFile(path.join(MOBILE, 'android', 'PianoJsBridge.java'), path.join(ensembleDir, 'PianoJsBridge.java'));
     patchAndroidStyles();
     // 使用 Java 实现（app 模块未启用 Kotlin 插件，.kt 不会被编译）
     const legacyKt = path.join(path.dirname(ktDest), 'MidiBridgePlugin.kt');

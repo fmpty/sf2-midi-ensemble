@@ -6,7 +6,7 @@ import { MidiHub } from './midi.js';
 import { NativeMidiHub, isNativeMidiAvailable } from './native-midi.js';
 import { VirtualKeyboard } from './keyboard.js';
 import { GM_PROGRAMS, noteName, noteNameOnKey, programLabel } from './gm.js';
-import { getBuiltinSoundfont, openSoundfont, loadSoundfontPaths, storeGet, storeSet, getInfo, isMobile, isElectron, keepAwake } from './platform.js';
+import { getBuiltinSoundfont, openSoundfont, loadSoundfontPaths, storeGet, storeSet, getInfo, isMobile, isElectron, keepAwake, nativePianoBridge } from './platform.js';
 import { initLayout, tierFromWidth, scheduleSyncJianpuPianoMetrics } from './layout.js';
 import {
     dedupeDevices,
@@ -619,8 +619,10 @@ function keyElementAt(x, y) {
     return target && target.closest ? target.closest('.pkey') : null;
 }
 
-/** 滑奏时每个音的最短时长：太短会听不见，导致轮指「丢音」 */
-const GLIDE_NOTE_MS = 70;
+/** 滑奏时每个音的最短时长：直连 JNI 时可略短，减少拖泥带水 */
+function glideNoteMs() {
+    return engine?.native && nativePianoBridge() ? 28 : 70;
+}
 
 function pianoPress(pointerId, keyEl, velocity = 100) {
     if (!keyEl) return;
@@ -652,7 +654,7 @@ function pianoRelease(pointerId, glide = false) {
         if (cur && cur.note === a.note && cur.channel === a.channel) return;
         engine.noteOff(a.channel, a.note);
     };
-    if (glide) setTimeout(finish, GLIDE_NOTE_MS);
+    if (glide) setTimeout(finish, glideNoteMs());
     else finish();
 }
 
@@ -918,10 +920,13 @@ async function ensureEngine(retry = false) {
         engine.setVoiceCap(state.master.voiceCap);
         const info = engine.latencyInfo;
         log(engine.native
-            ? `原生合成已启动（AAudio ${engine.sampleRate} Hz，缓冲 ${engine.latencyMs} ms）`
+            ? `原生合成已启动（AAudio ${engine.sampleRate} Hz，周期约 ${engine.latencyMs} ms，输出队列约 ${engine.outputBufferMs} ms）`
             : `音频引擎已启动（${engine.sampleRate} Hz，缓冲 ${Math.round((info.base || 0) * 1000)} ms / 输出 ${Math.round((info.output || 0) * 1000)} ms${engine.lowLatency ? '，低延迟模式' : ''}）`, 'ok');
+        if (engine.native && isMobile() && nativePianoBridge()) {
+            log('屏幕钢琴：直连原生发声', 'ok');
+        }
         if (engine.native && engine.outputBufferMs >= 60) {
-            log(`输出缓冲偏大（${engine.outputBufferMs} ms，周期约 ${engine.latencyMs} ms）：多为蓝牙或系统大周期 HAL，可试有线耳机`, 'warn');
+            log(`输出队列 ${engine.outputBufferMs} ms 偏大（周期约 ${engine.latencyMs} ms），可试有线耳机或机身扬声器`, 'warn');
         }
         if (!engine.native) {
             const builtin = await getBuiltinSoundfont();
@@ -992,11 +997,16 @@ async function connectMidi() {
 function updateStatus() {
     dom.statRate.textContent = `${engine.sampleRate} Hz`;
     const lat = engine.latencyMs;
-    const buf = engine.native ? engine.outputBufferMs : 0;
-    dom.statLatency.textContent = `${lat} ms`;
-    dom.statLatency.title = engine.native && buf > lat
-        ? `AAudio 单周期约 ${lat} ms；输出队列约 ${buf} ms（与 PC 的 WebAudio 统计口径不同）`
-        : (engine.native ? 'AAudio 单周期延迟（与 PC WebAudio 口径不同）' : '');
+    if (engine.native) {
+        const queue = engine.outputBufferMs || 0;
+        dom.statLatency.textContent = `${lat} ms`;
+        dom.statLatency.title = queue > 0 && queue !== lat
+            ? `HAL 周期约 ${lat} ms；AAudio 输出队列约 ${queue} ms`
+            : `HAL 周期约 ${lat} ms`;
+    } else {
+        dom.statLatency.textContent = `${lat} ms`;
+        dom.statLatency.title = 'WebAudio 报告的输出延迟';
+    }
     dom.statVoices.textContent = String(engine.voiceCount);
 }
 

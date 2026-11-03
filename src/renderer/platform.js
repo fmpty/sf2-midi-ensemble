@@ -36,6 +36,14 @@ export function nativeSynthPlugin() {
     return capacitorPlugin('SynthBridge');
 }
 
+/** Android 屏幕钢琴直连 JNI（window.Sf2PianoNative），比 Capacitor 插件快 */
+export function nativePianoBridge() {
+    if (typeof window === 'undefined') return null;
+    const b = window.Sf2PianoNative;
+    if (!b || typeof b.noteOn !== 'function') return null;
+    return b;
+}
+
 export function isMobile() {
     if (typeof navigator === 'undefined') return false;
     return /Android|iPhone|iPad|iPod|Mobile|Tablet/i.test(navigator.userAgent) ||

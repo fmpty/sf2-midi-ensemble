@@ -15,6 +15,9 @@ import com.sf2ensemble.midi.MidiBridgePlugin;
 import com.sf2ensemble.synth.SynthBridgePlugin;
 
 public class MainActivity extends BridgeActivity {
+
+    private boolean pianoJsAttached = false;
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(MidiBridgePlugin.class);
@@ -26,9 +29,26 @@ public class MainActivity extends BridgeActivity {
     }
 
     @Override
+    public void onStart() {
+        super.onStart();
+        attachPianoJsBridge();
+        tintWebViewBackground();
+    }
+
+    @Override
     public void onResume() {
         super.onResume();
+        attachPianoJsBridge();
         tintWebViewBackground();
+    }
+
+    /** 屏幕钢琴：WebView JavascriptInterface → nativeNoteOn/Off */
+    private void attachPianoJsBridge() {
+        if (pianoJsAttached || getBridge() == null) return;
+        WebView webView = getBridge().getWebView();
+        if (webView == null) return;
+        webView.addJavascriptInterface(new PianoJsBridge(), "Sf2PianoNative");
+        pianoJsAttached = true;
     }
 
     /** WebView 默认白底，在 HTML/CSS 就绪前会闪白屏 */
