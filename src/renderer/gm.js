@@ -68,7 +68,51 @@ export function noteNameOnKey(midi) {
     return `${letter}${oct}`;
 }
 
+/** 常见 GM 鼓组（程序号 → 中文, 英文参考名） */
+export const DRUM_KITS = [
+    ['标准鼓组', 'Standard'],
+    ['房间鼓组', 'Room'],
+    ['力量鼓组', 'Power'],
+    ['电子鼓组', 'Electronic'],
+    ['TR-808 鼓组', 'TR-808'],
+    ['爵士鼓组', 'Jazz'],
+    ['画笔鼓组', 'Brush'],
+    ['管弦鼓组', 'Orchestra'],
+];
+
+export function drumKitChinese(program) {
+    const n = Math.max(0, Math.min(127, program));
+    const k = DRUM_KITS[n];
+    return k ? k[0] : `鼓组 ${n + 1}`;
+}
+
+/** 英文（音源/SF2 名）在前，中文（GM 对照）在括号内 */
+export function presetDisplayName(preset) {
+    const program = Math.max(0, Math.min(127, preset.program ?? 0));
+    const raw = (preset.name || '').trim();
+    if (preset.isDrum) {
+        const zh = drumKitChinese(program);
+        if (raw) {
+            if (raw.includes(zh)) return raw;
+            return `${raw}（${zh}）`;
+        }
+        const ref = DRUM_KITS[program];
+        const en = ref ? ref[1] : `Kit ${program + 1}`;
+        return `${en}（${zh}）`;
+    }
+    const row = GM_PROGRAMS[program];
+    if (row) {
+        const [zh, en] = row;
+        if (raw) {
+            if (raw.includes(zh)) return raw;
+            return `${raw}（${zh}）`;
+        }
+        return `${en}（${zh}）`;
+    }
+    return raw || `Program ${program + 1}`;
+}
+
 export function programLabel(program) {
     const p = GM_PROGRAMS[Math.max(0, Math.min(127, program))];
-    return p ? `${program + 1}. ${p[0]}` : `程序 ${program}`;
+    return p ? `${program + 1}. ${p[1]}（${p[0]}）` : `程序 ${program}`;
 }

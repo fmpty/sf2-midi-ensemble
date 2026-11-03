@@ -5,7 +5,9 @@ import { NativeSynthEngine, isNativeSynthAvailable } from './native-synth.js';
 import { MidiHub } from './midi.js';
 import { NativeMidiHub, isNativeMidiAvailable } from './native-midi.js';
 import { VirtualKeyboard } from './keyboard.js';
-import { GM_PROGRAMS, noteName, noteNameOnKey, programLabel } from './gm.js';
+import {
+    GM_PROGRAMS, drumKitChinese, noteName, noteNameOnKey, presetDisplayName, programLabel,
+} from './gm.js';
 import { getBuiltinSoundfont, openSoundfont, loadSoundfontPaths, storeGet, storeSet, getInfo, isMobile, isElectron, keepAwake, nativePianoBridge } from './platform.js';
 import { initLayout, tierFromWidth, scheduleSyncJianpuPianoMetrics } from './layout.js';
 import {
@@ -335,7 +337,7 @@ function renderDevices() {
                 </div>
             </div>
             <div class="card-foot">
-                <span class="hint">通道 ${r.channel + 1} · ${r.isDrum ? '打击乐' : programLabel(r.program)}</span>
+                <span class="hint">通道 ${r.channel + 1} · ${r.isDrum ? `Drums（${drumKitChinese(r.drumProgram)}）` : programLabel(r.program)}</span>
                 <span class="activity" data-activity></span>
             </div>`;
         wireCard(card, r);
@@ -409,9 +411,11 @@ function presetOption(route, isDrum) {
         const bankMatch = !p.bankId || route.soundBankId === p.bankId;
         const sel = bankMatch && !isDrum && !route.isDrum && route.bankMSB === p.bankMSB && route.bankLSB === p.bankLSB && route.program === p.program;
         const selD = bankMatch && isDrum && route.isDrum && route.drumProgram === p.program && route.bankMSB === p.bankMSB;
-        const label = p.bankId && engine.banks.length > 1
-            ? `[${engine.banks.find((b) => b.id === p.bankId)?.name || p.bankId}] ${p.name || ''}`
-            : (p.name || '');
+        let label = presetDisplayName(p);
+        if (p.bankId && engine.banks.length > 1) {
+            const bank = engine.banks.find((b) => b.id === p.bankId)?.name || p.bankId;
+            label = `[${bank}] ${label}`;
+        }
         return `<option value="${value}" ${sel || selD ? 'selected' : ''}>${escapeHtml(label)}</option>`;
     };
 }
@@ -490,7 +494,11 @@ function refreshCardValues(card, route) {
     const map = [Math.round(route.volume * 100), panLabel(route.pan), Math.round(route.reverb * 100), Math.round(route.chorus * 100), (route.transpose > 0 ? '+' : '') + route.transpose, '×' + route.velocityGain.toFixed(2)];
     vals.forEach((v, i) => { if (map[i] != null) v.textContent = map[i]; });
     const foot = card.querySelector('.card-foot .hint');
-    if (foot) foot.textContent = `通道 ${route.channel + 1} · ${route.isDrum ? '打击乐' : programLabel(route.program)}`;
+    if (foot) {
+        foot.textContent = route.isDrum
+            ? `通道 ${route.channel + 1} · Drums（${drumKitChinese(route.drumProgram)}）`
+            : `通道 ${route.channel + 1} · ${programLabel(route.program)}`;
+    }
 }
 
 function testRoute(route) {
