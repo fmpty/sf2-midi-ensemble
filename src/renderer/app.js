@@ -438,6 +438,20 @@ function applyInstrumentValue(route, raw) {
     route.isDrum = false;
 }
 
+function stepRouteInstrument(route, delta) {
+    if (!route || !delta) return;
+    if (route.isDrum) {
+        route.drumProgram = (route.drumProgram + delta + 128) % 128;
+        log(`鼓组：${drumKitChinese(route.drumProgram)}`, 'info');
+    } else {
+        route.program = (route.program + delta + 128) % 128;
+        log(`乐器：${programLabel(route.program)}`, 'info');
+    }
+    applyRoute(route);
+    saveConfig();
+    renderDevices();
+}
+
 function applyDrumValue(route, raw) {
     const parts = raw.split('|');
     if (parts.length >= 4 && /^native\d+$/.test(parts[0])) {
@@ -1177,8 +1191,23 @@ async function main() {
     hub.onError = (e) => log(`MIDI 错误：${e.message}`, 'error');
 
     vkb.resolveRoute = () => state.routes[VIRTUAL_KEY] || null;
+    vkb.onTransposeChange = (delta) => {
+        const route = state.routes[VIRTUAL_KEY];
+        if (!route) return;
+        route.transpose = Math.max(-24, Math.min(24, (route.transpose || 0) + delta));
+        applyAllRoutes();
+        saveConfig();
+        renderDevices();
+        vkb.releaseAll();
+    };
+    vkb.onInstrumentChange = (delta) => {
+        const route = state.routes[VIRTUAL_KEY];
+        if (!route) return;
+        stepRouteInstrument(route, delta);
+        vkb.releaseAll();
+    };
     vkb.onActivity = (info) => {
-        if (info.octave != null) return;
+        if (info.transposeDelta != null || info.instrumentDelta != null) return;
         flashActivity(VIRTUAL_KEY, info.note, info.velocity);
     };
     vkb.setEnabled(true);

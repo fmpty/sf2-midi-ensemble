@@ -1,13 +1,14 @@
 /**
  * 电脑键盘虚拟 MIDI 手柄：可像一台真实手柄一样被分配到任意通道/乐器。
- * 用于在无硬件时试音，也可作为额外的「一路控制器」参与合奏。
+ * 数字键与字母键按键盘从左到右物理顺序对应连续半音；Shift+↑↓ 移调，Shift+←→ 换乐器。
  */
-const KEY_OFFSETS = {
-    KeyA: 0, KeyW: 1, KeyS: 2, KeyE: 3, KeyD: 4, KeyF: 5, KeyT: 6, KeyG: 7,
-    KeyY: 8, KeyH: 9, KeyU: 10, KeyJ: 11, KeyK: 12, KeyO: 13, KeyL: 14,
-    KeyP: 15, Semicolon: 16, Quote: 17,
-    Digit1: -12, Digit2: -10, Digit3: -8, Digit4: -5, Digit5: -3,
-};
+const PHYSICAL_KEY_CODES = [
+    'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5', 'Digit6', 'Digit7', 'Digit8', 'Digit9', 'Digit0',
+    'KeyQ', 'KeyW', 'KeyE', 'KeyR', 'KeyT', 'KeyY', 'KeyU', 'KeyI', 'KeyO', 'KeyP',
+    'KeyA', 'KeyS', 'KeyD', 'KeyF', 'KeyG', 'KeyH', 'KeyJ', 'KeyK', 'KeyL',
+    'KeyZ', 'KeyX', 'KeyC', 'KeyV', 'KeyB', 'KeyN', 'KeyM',
+];
+const KEY_OFFSETS = Object.fromEntries(PHYSICAL_KEY_CODES.map((code, i) => [code, i]));
 
 export class VirtualKeyboard {
     constructor(engine) {
@@ -16,6 +17,8 @@ export class VirtualKeyboard {
         this.octave = 4;
         this.resolveRoute = () => null;
         this.onActivity = () => {};
+        this.onTransposeChange = null;
+        this.onInstrumentChange = null;
         this.held = new Set();
         this._down = this.handleDown.bind(this);
         this._up = this.handleUp.bind(this);
@@ -36,17 +39,47 @@ export class VirtualKeyboard {
         return 12 * (this.octave + 1);
     }
 
+    noteForCode(code) {
+        const off = KEY_OFFSETS[code];
+        if (off === undefined) return null;
+        const route = this.resolveRoute();
+        let note = this.baseNote() + off;
+        if (route && this.engine.native) note += route.transpose || 0;
+        return Math.max(0, Math.min(127, note));
+    }
+
     handleDown(e) {
         if (!this.enabled) return;
-        if (e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
-        if (e.code === 'KeyZ') { this.octave = Math.max(0, this.octave - 1); this.onActivity({ octave: this.octave }); return; }
-        if (e.code === 'KeyX') { this.octave = Math.min(8, this.octave + 1); this.onActivity({ octave: this.octave }); return; }
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+        if (e.shiftKey) {
+            if (e.code === 'ArrowUp' || e.code === 'ArrowDown') {
+                e.preventDefault();
+                if (e.repeat) return;
+                const delta = e.code === 'ArrowUp' ? 1 : -1;
+                if (this.onTransposeChange) this.onTransposeChange(delta);
+                this.onActivity({ transposeDelta: delta });
+                return;
+            }
+            if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+                e.preventDefault();
+                if (e.repeat) return;
+                const delta = e.code === 'ArrowRight' ? 1 : -1;
+                if (this.onInstrumentChange) this.onInstrumentChange(delta);
+                this.onActivity({ instrumentDelta: delta });
+                return;
+            }
+            return;
+        }
+
+        if (e.repeat) return;
         const off = KEY_OFFSETS[e.code];
         if (off === undefined) return;
         e.preventDefault();
         const route = this.resolveRoute();
         if (!route || !route.enabled) return;
-        const note = this.baseNote() + off;
+        const note = this.noteForCode(e.code);
+        if (note == null) return;
         if (this.held.has(e.code)) return;
         this.held.add(e.code);
         const vel = Math.round(100 * (route.velocityGain != null ? route.velocityGain : 1));
@@ -61,7 +94,8 @@ export class VirtualKeyboard {
         this.held.delete(e.code);
         const route = this.resolveRoute();
         if (!route) return;
-        const note = this.baseNote() + off;
+        const note = this.noteForCode(e.code);
+        if (note == null) return;
         this.engine.noteOff(route.channel, note);
         this.onActivity({ note, velocity: 0, on: false });
     }
@@ -69,9 +103,8 @@ export class VirtualKeyboard {
     releaseAll() {
         const route = this.resolveRoute();
         for (const code of [...this.held]) {
-            const off = KEY_OFFSETS[code];
-            if (off === undefined) continue;
-            if (route) this.engine.noteOff(route.channel, this.baseNote() + off);
+            const note = this.noteForCode(code);
+            if (note != null && route) this.engine.noteOff(route.channel, note);
             this.held.delete(code);
         }
     }
