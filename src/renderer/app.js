@@ -570,18 +570,6 @@ function pianoKeyboardRange() {
     ];
 }
 
-function updatePianoInfoHint() {
-    if (!dom.pianoInfo) return;
-    const octLabel = pianoOctaveShift > 0 ? `+${pianoOctaveShift}` : String(pianoOctaveShift);
-    if (pianoLayoutMode() === 'jianpu') {
-        const rows = portraitOctaveStarts();
-        dom.pianoInfo.textContent = `八度 ${octLabel} · ${noteName(rows[2])}–${noteName(rows[0] + 11)}`;
-    } else {
-        const [start, end] = pianoKeyboardRange();
-        dom.pianoInfo.textContent = `${noteName(start)}–${noteName(end)} · 八度 ${octLabel}`;
-    }
-}
-
 function shiftPianoOctave(delta) {
     const next = Math.max(PIANO_OCT_MIN, Math.min(PIANO_OCT_MAX, pianoOctaveShift + delta));
     if (next === pianoOctaveShift) return;
@@ -798,7 +786,6 @@ function renderPiano() {
     if (pianoLayoutMode() === 'jianpu') {
         scheduleSyncJianpuPianoMetrics();
     }
-    updatePianoInfoHint();
 }
 
 /* ------------------------------ 音源管理 ------------------------------ */
@@ -1134,7 +1121,7 @@ export async function startApp() {
 async function main() {
     const ids = ['btn-start', 'start-overlay', 'status-audio', 'audio-dot', 'master-volume', 'master-volume-val',
         'voice-cap', 'voice-cap-val', 'bank-list', 'bank-count', 'btn-load-bank', 'device-list', 'btn-rescan',
-        'btn-panic', 'btn-reset', 'kbd-toggle', 'piano', 'piano-info', 'btn-oct-down', 'btn-oct-up',
+        'btn-panic', 'btn-reset', 'kbd-toggle', 'piano', 'btn-oct-down', 'btn-oct-up',
         'stat-rate', 'stat-latency',
         'stat-voices', 'log', 'app-version', 'low-latency', 'tabs', 'dev-count'];
     ids.forEach((id) => { dom[camel(id)] = el(id); });
@@ -1152,10 +1139,7 @@ async function main() {
 
     vkb.resolveRoute = () => state.routes[VIRTUAL_KEY] || null;
     vkb.onActivity = (info) => {
-        if (info.octave != null) {
-            if (dom.pianoInfo) dom.pianoInfo.textContent = `电脑键盘八度：${info.octave}（Z / X 切换）`;
-            return;
-        }
+        if (info.octave != null) return;
         flashActivity(VIRTUAL_KEY, info.note, info.velocity);
     };
     vkb.setEnabled(true);
@@ -1199,7 +1183,7 @@ async function main() {
             const plat = typeof cap.getPlatform === 'function' ? cap.getPlatform() : 'native';
             document.documentElement.classList.add('native-app', `platform-${plat}`);
         }
-        dom.appVersion.textContent = `v${info.version} · ${info.platform}`;
+        dom.appVersion.textContent = info.version ? `v${info.version}` : '';
         if (!info.hasBuiltin) log('未检测到内置音源（assets/soundfonts），启动时可手动载入 SF2', 'warn');
         if (!isElectron()) {
             if (info.secureContext === false) log('当前非安全上下文（需 HTTPS 或 localhost），Web MIDI 不可用', 'warn');

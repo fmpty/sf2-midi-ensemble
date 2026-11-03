@@ -99,8 +99,18 @@ async function copyProcessor() {
     fs.copyFileSync(src, path.join(OUT_DIR, 'spessasynth_processor.min.js'));
 }
 
+function writeAppVersion() {
+    const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+    const out = path.join(ROOT, 'src', 'renderer', 'app-version.js');
+    fs.writeFileSync(
+        out,
+        `/** 构建时从 package.json 写入，勿手改 */\nexport const APP_VERSION = ${JSON.stringify(pkg.version)};\n`,
+    );
+}
+
 async function build() {
     ensureSoundfont();
+    writeAppVersion();
     await copyProcessor();
     const options = {
         entryPoints: [path.join(ROOT, 'src', 'renderer', 'boot.js')],

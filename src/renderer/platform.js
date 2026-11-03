@@ -7,6 +7,8 @@
  * 渲染层其它模块只依赖本模块，从而同一套代码可运行在桌面与移动端浏览器。
  */
 
+import { APP_VERSION } from './app-version.js';
+
 const SF_DIR = 'assets/soundfonts';
 const MANIFEST = `${SF_DIR}/manifest.json`;
 const STORE_PREFIX = 'sf2ensemble:';
@@ -148,7 +150,7 @@ export async function getInfo() {
     if (isElectron()) return window.api.getInfo();
     const files = await listBuiltinSoundfonts();
     return {
-        version: 'web',
+        version: APP_VERSION,
         platform: isMobile() ? 'mobile-browser' : 'browser',
         hasBuiltin: files.length > 0,
         secureContext: window.isSecureContext,
