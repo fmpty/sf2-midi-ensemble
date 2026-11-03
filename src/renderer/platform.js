@@ -79,8 +79,19 @@ export async function getBuiltinSoundfont() {
 }
 
 /** 选择音源文件对话框（浏览器模式用 <input type=file>） */
-export function openSoundfont() {
+export async function openSoundfont() {
     if (isElectron()) return window.api.openSoundfont();
+    const synth = nativeSynthPlugin();
+    if (synth && typeof synth.pickSoundfont === 'function') {
+        try {
+            const res = await synth.pickSoundfont();
+            if (!res || !res.ok) return [];
+            const name = res.name || 'imported.sf2';
+            return [{ name, path: res.path || '', data: null }];
+        } catch {
+            return [];
+        }
+    }
     return new Promise((resolve) => {
         const input = document.createElement('input');
         input.type = 'file';

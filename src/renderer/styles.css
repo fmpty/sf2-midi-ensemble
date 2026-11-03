@@ -110,9 +110,6 @@ html.electron .tab { padding-top: 6px; padding-bottom: 6px; min-height: 32px; }
 html.native-app .topbar {
     padding-top: calc(6px + env(safe-area-inset-top, 0px));
 }
-html.native-app.platform-android .statusbar {
-    padding-bottom: calc(6px + env(safe-area-inset-bottom, 0px));
-}
 html.native-app.platform-android[data-layout="phone"][data-orient="portrait"] .tabs {
     padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
 }
@@ -120,7 +117,12 @@ html.native-app.platform-android[data-layout="phone"][data-orient="portrait"] .t
 .logo { color: var(--accent-2); font-size: 20px; flex: none; }
 .brand-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .version { color: var(--muted); font-size: 12px; font-weight: 400; white-space: nowrap; }
-.top-controls { display: flex; align-items: center; gap: 10px; flex: none; }
+.top-controls { display: flex; align-items: center; gap: 10px; flex: none; min-width: 0; flex-wrap: wrap; justify-content: flex-end; }
+.top-stats {
+    display: flex; align-items: center; gap: 12px; flex: none;
+    color: var(--muted); font-size: 12px; white-space: nowrap;
+}
+.top-stats b { color: var(--text); font-weight: 600; }
 .status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); white-space: nowrap; }
 .slider { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
 .slider.grow { flex: 1; min-width: 0; }
@@ -170,9 +172,29 @@ main { flex: 1; min-height: 0; display: flex; padding: 12px; padding-left: calc(
 .panel.grow { flex: 1; }
 #pane-more > .panel:not(.grow) { max-width: 720px; }
 
+/* 设置页横屏：左侧参数、右侧日志 */
+html[data-orient="landscape"] #pane-more {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 12px;
+}
+html[data-orient="landscape"] #pane-more > .panel:not(.grow) {
+    flex: 0 0 min(400px, 38%);
+    max-width: none;
+    min-width: 280px;
+}
+html[data-orient="landscape"] #pane-more > .panel.grow {
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+}
+
 /* ---------------- 演奏页 ---------------- */
 .play-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; flex: none; }
 .play-bar.bottom { gap: 14px; }
+.octave-ctrl { display: flex; align-items: center; gap: 8px; flex: none; }
+.octave-ctrl .mini { min-width: 4.2em; }
 .play-target { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
 .play-target .lbl { color: var(--muted); font-size: 12px; flex: none; }
 .chips { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; padding: 2px; }
@@ -200,8 +222,7 @@ main { flex: 1; min-height: 0; display: flex; padding: 12px; padding-left: calc(
     overflow: hidden;
 }
 #pane-play .piano-hint,
-#pane-play .play-bar.bottom,
-#pane-play .play-tips {
+#pane-play .play-bar.bottom {
     flex: none;
     position: relative;
     z-index: 2;
@@ -233,6 +254,8 @@ html[data-orient="portrait"] .piano:not(.jianpu) { height: clamp(110px, 26vh, 24
     --bk-of-white: 0.58;
     width: 100%;
     flex: none;
+    /* layout.js 变量未就绪时避免三排高度为 0（看起来像空白） */
+    min-height: clamp(100px, 28vh, 360px);
     height: var(--jianpu-total-h, auto);
     max-height: var(--jianpu-slot-h, 100%);
     display: grid;
@@ -249,7 +272,7 @@ html[data-orient="portrait"] .piano:not(.jianpu) { height: clamp(110px, 26vh, 24
     display: flex; align-items: flex-end; justify-content: center;
     touch-action: none; -webkit-tap-highlight-color: transparent;
 }
-.pkey span { font-size: 9px; color: #6b7484; padding-bottom: 3px; pointer-events: none; }
+.pkey .pk-label { font-size: 9px; color: #6b7484; padding-bottom: 3px; pointer-events: none; white-space: nowrap; line-height: 1.1; }
 .pkey.white {
     flex: 1;
     min-width: 0;
@@ -263,14 +286,20 @@ html[data-orient="portrait"] .piano:not(.jianpu) { height: clamp(110px, 26vh, 24
     background: linear-gradient(#2c3441, #12161d); border: 1px solid #000; z-index: 2; color: #fff;
     border-radius: 0 0 4px 4px;
 }
-.pkey.black span { color: #9aa3b0; font-size: 8px; }
+.pkey.black .pk-label { color: #b8c4d4; font-size: 7px; padding-bottom: 2px; }
 .pkey.black.active { background: linear-gradient(#3d7cc0, #1d4e86); }
-.pkey.black.active span { color: #dceeff; }
+.pkey.black.active .pk-label { color: #eef6ff; }
 .piano-hint { margin: 0; flex: none; }
-.play-tips { color: var(--muted); font-size: 11px; margin: 0; line-height: 1.6; flex: none; }
 
 /* ---------------- 手柄页 ---------------- */
+#pane-devices .device-list { flex: 1; min-height: 0; }
 .device-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; overflow: auto; align-content: start; padding-bottom: 4px; }
+.device-foot {
+    flex: none; margin-top: auto; padding-top: 10px;
+    display: flex; flex-direction: column; gap: 8px; align-items: stretch;
+}
+.device-foot .scan-btn { width: 100%; min-height: 44px; font-size: 15px; }
+.device-foot .hint { margin: 0; text-align: center; }
 
 .card {
     border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-2); padding: 10px;
@@ -292,6 +321,8 @@ html[data-orient="portrait"] .piano:not(.jianpu) { height: clamp(110px, 26vh, 24
 .dot.flash { background: #fff; box-shadow: 0 0 8px 2px var(--accent); }
 .tag { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; flex: none; }
 .tag-ble { color: #7fd0ff; border-color: #2a4c66; }
+.tag-mac { font-size: 10px; font-variant-numeric: tabular-nums; opacity: .88; max-width: 9em; overflow: hidden; text-overflow: ellipsis; }
+.tag-warn { color: var(--warn); border-color: #57452b; }
 .tag-off { color: var(--warn); border-color: #57452b; }
 .card-body { display: flex; flex-direction: column; gap: 6px; }
 .row { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -324,17 +355,6 @@ html[data-orient="portrait"] .piano:not(.jianpu) { height: clamp(110px, 26vh, 24
 .log-ok { color: var(--accent-2); }
 .log-warn { color: var(--warn); }
 .log-error { color: var(--danger); }
-
-/* ---------------- 状态栏 ---------------- */
-.statusbar {
-    display: flex; gap: 16px; padding: 6px 14px; padding-bottom: calc(6px + var(--safe-b));
-    padding-left: calc(14px + var(--safe-l)); padding-right: calc(14px + var(--safe-r));
-    border-top: 1px solid var(--line); background: var(--bg-soft);
-    color: var(--muted); font-size: 12px; flex: none; overflow-x: auto; white-space: nowrap;
-    scrollbar-width: none;
-}
-.statusbar::-webkit-scrollbar { display: none; }
-.statusbar b { color: var(--text); font-weight: 600; }
 
 /* ---------------- 桌面（Electron 默认 ≥1024） ---------------- */
 html[data-layout="desktop"] .piano:not(.jianpu) { height: clamp(140px, 24vh, 260px); }
@@ -369,15 +389,12 @@ html[data-layout="phone"] .piano:not(.jianpu) { height: clamp(128px, min(40vh, 4
 html[data-layout="phone"] .device-list { grid-template-columns: 1fr; }
 html[data-layout="phone"] .row > label { width: 58px; }
 html[data-layout="phone"] .row .val { width: 42px; }
-html[data-layout="phone"] .play-tips { display: none; }
-html[data-layout="phone"] .statusbar { gap: 10px; font-size: 11px; }
+html[data-layout="phone"] .top-stats { gap: 8px; font-size: 10px; }
 html[data-layout="phone"] .overlay-box h1 { font-size: 22px; }
 html[data-layout="phone"] .overlay-box .tip { font-size: 11px; }
 html[data-layout="phone"] .play-bar.bottom { flex-wrap: nowrap; }
 html[data-layout="phone"] .play-bar.bottom .slider.grow { min-width: 0; }
-html[data-layout="phone"] .statusbar .st-state { display: none; }
-
-/* 手机竖屏：底 Tab + 状态栏紧贴顶栏下（拇指区） */
+/* 手机竖屏：底 Tab（拇指区） */
 html[data-layout="phone"][data-orient="portrait"] .tabs {
     order: 3;
     border-top: 1px solid var(--line);
@@ -389,20 +406,12 @@ html[data-layout="phone"][data-orient="portrait"] .tabs {
 }
 html[data-layout="phone"][data-orient="portrait"] .tab .txt { display: none; }
 html[data-layout="phone"][data-orient="portrait"] main { order: 2; padding-bottom: 4px; }
-html[data-layout="phone"][data-orient="portrait"] .statusbar {
-    order: 1;
-    border-top: none;
-    border-bottom: 1px solid var(--line);
-    padding: 4px 12px;
-    padding-bottom: 4px;
-}
 
 /* 手机横屏：压缩顶栏，钢琴尽量占宽 */
 html[data-layout="phone"][data-orient="landscape"] .topbar { padding-top: 4px; padding-bottom: 4px; }
 html[data-layout="phone"][data-orient="landscape"] .tabs { padding: 4px 8px; }
 html[data-layout="phone"][data-orient="landscape"] .piano:not(.jianpu) { height: clamp(100px, 52vh, 200px); }
 html[data-layout="phone"][data-orient="landscape"] main { padding: 6px 10px; }
-html[data-layout="phone"][data-orient="landscape"] .play-tips { display: none; }
 html[data-layout="phone"][data-orient="landscape"] #pane-play .play-bar:first-child { display: none; }
 html[data-layout="phone"][data-orient="landscape"] .piano-hint { font-size: 11px; }
 

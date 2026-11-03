@@ -30,6 +30,8 @@ export class NativeSynthEngine {
         this.burstFrames = 0;
         this.voiceCount = 0;
         this.banks = [];
+        /** @type {{ name: string, path?: string, builtin?: boolean }[]} */
+        this.bankMeta = [];
         this.presets = [];
         this.masterVolume = 0.9;
         this.voiceCap = 96;
@@ -49,12 +51,26 @@ export class NativeSynthEngine {
         if (fn) fn(payload);
     }
 
+    /** 顶栏展示：单 burst 周期（更接近体感），非整段 AAudio 队列 */
     get latencyMs() {
+        const rate = this.sampleRate || 48000;
+        if (this.burstFrames > 0 && rate > 0) {
+            return Math.max(1, Math.round((this.burstFrames * 1000) / rate));
+        }
+        return this.bufferMs || 0;
+    }
+
+    /** 实际输出队列长度（平板常比 burst 大，旧版顶栏误显示此值） */
+    get outputBufferMs() {
         return this.bufferMs || 0;
     }
 
     get latencyInfo() {
-        return { base: this.burstFrames / (this.sampleRate || 48000), output: this.bufferMs / 1000 };
+        const rate = this.sampleRate || 48000;
+        return {
+            base: this.burstFrames / rate,
+            output: this.bufferMs / 1000,
+        };
     }
 
     get lowLatency() {
@@ -79,7 +95,9 @@ export class NativeSynthEngine {
         this.started = true;
         this.running = !!res.running;
 
-        this.banks = [{ id: 'native', name: bank.path ? bank.path.split('/').pop() : '内置音源', builtin: true }];
+        const label = bank.path ? bank.path.split('/').pop() : '内置音源';
+        this.bankMeta = [{ name: label, path: bank.path || '', builtin: true }];
+        this.syncBankIds();
         this.emit('banks', this.banks);
 
         await this.refreshPresets();
@@ -110,26 +128,55 @@ export class NativeSynthEngine {
 
     /* ------------------------------ 音源 ------------------------------ */
 
-    /** 原生层只按文件路径加载；ArrayBuffer 入口在原生模式下不支持 */
+    syncBankIds() {
+        this.banks = this.bankMeta.map((m, i) => ({
+            id: `native${i}`,
+            name: m.name,
+            builtin: !!m.builtin,
+        }));
+    }
+
+    /** 原生层按文件路径追加音源（可多个并存，与 PC 一致） */
     async addBank(arrayBuffer, name) {
-        if (typeof arrayBuffer === 'string') {
-            const p = nativeSynthPlugin();
-            const res = await p.loadBank({ path: arrayBuffer });
-            if (!res || !res.ok) throw new Error('原生音源载入失败');
-            this.banks = [{ id: 'native', name, builtin: false }];
-            this.emit('banks', this.banks);
-            await this.refreshPresets();
-            return 'native';
+        if (typeof arrayBuffer !== 'string') {
+            throw new Error('原生合成模式不支持从内存载入音源');
         }
-        throw new Error('原生合成模式不支持从内存载入音源');
+        const p = nativeSynthPlugin();
+        const res = await p.loadBank({ path: arrayBuffer });
+        if (!res || !res.ok) throw new Error('原生音源载入失败');
+        this.bankMeta.push({ name, path: arrayBuffer, builtin: false });
+        this.syncBankIds();
+        this.emit('banks', this.banks);
+        await this.refreshPresets();
+        const idx = typeof res.bankIndex === 'number' ? res.bankIndex : this.bankMeta.length - 1;
+        return `native${idx}`;
     }
 
-    async removeBank() {
-        return false;
+    async removeBank(id) {
+        if (this.bankMeta.length <= 1) return false;
+        const m = String(id).match(/^native(\d+)$/);
+        if (!m) return false;
+        const index = parseInt(m[1], 10);
+        const p = nativeSynthPlugin();
+        if (!p || !p.removeBank) return false;
+        const res = await p.removeBank({ index });
+        if (!res || !res.ok) return false;
+        this.bankMeta.splice(index, 1);
+        this.syncBankIds();
+        this.emit('banks', this.banks);
+        await this.refreshPresets();
+        return true;
     }
 
-    setBankOrder() {
-        /* 原生模式只有一个音源 */
+    async setBankOrder(ids) {
+        const p = nativeSynthPlugin();
+        if (!p || !p.setBankOrder || !ids.length) return;
+        const order = ids.map((id) => {
+            const m = String(id).match(/^native(\d+)$/);
+            return m ? parseInt(m[1], 10) : 0;
+        });
+        await p.setBankOrder({ order: JSON.stringify(order) });
+        await this.refreshPresets();
     }
 
     /* ------------------------------ 参数 ------------------------------ */
@@ -162,8 +209,14 @@ export class NativeSynthEngine {
         const ch = clampCh(route.channel);
         this.ensureChannels(ch + 1);
         const program = route.isDrum ? route.drumProgram : route.program;
+        let bankIndex = 0;
+        if (route.soundBankId) {
+            const hit = String(route.soundBankId).match(/^native(\d+)$/);
+            if (hit) bankIndex = parseInt(hit[1], 10);
+        }
         p.setChannel({
             channel: ch,
+            bankIndex,
             program,
             isDrum: !!route.isDrum,
             bank: ((route.bankMSB || 0) << 7) | (route.bankLSB || 0),

@@ -33,6 +33,11 @@
             <span id="app-version" class="version"></span>
         </div>
         <div class="top-controls">
+            <div class="top-stats">
+                <span>采样率 <b id="stat-rate">-</b></span>
+                <span>延迟 <b id="stat-latency">-</b></span>
+                <span>发声 <b id="stat-voices">0</b></span>
+            </div>
             <span class="status"><i id="audio-dot" class="dot dot-off"></i><span id="status-audio" class="warn">未启动</span></span>
             <button id="btn-panic" class="mini danger">全部停音</button>
         </div>
@@ -47,12 +52,6 @@
 
     <main>
         <section id="pane-play" class="tab-pane active">
-            <div class="play-bar">
-                <div class="play-target">
-                    <span class="lbl">演奏目标</span>
-                    <div id="target-chips" class="chips"></div>
-                </div>
-            </div>
             <div class="piano-wrap">
                 <div id="piano" class="piano"></div>
             </div>
@@ -62,19 +61,19 @@
                     <input id="master-volume" type="range" min="0" max="1.5" step="0.01" value="0.9" />
                     <span id="master-volume-val" class="val">90</span>
                 </label>
-                <button id="btn-rescan" class="mini">扫描设备</button>
+                <div class="octave-ctrl">
+                    <button type="button" id="btn-oct-down" class="mini">八度 −</button>
+                    <button type="button" id="btn-oct-up" class="mini">八度 +</button>
+                </div>
             </div>
-            <p class="play-tips">屏幕键盘可直接滑奏（支持多点触控）· 电脑键盘 A W S E D F T G Y H U J K 演奏，Z / X 切换八度</p>
         </section>
 
         <section id="pane-devices" class="tab-pane">
-            <div class="pane-head">
-                <h2>手柄 / 乐器映射</h2>
-                <span class="hint">每只手柄独占一个 MIDI 通道</span>
-            </div>
-            <p id="midi-status" class="hint">未连接</p>
             <div id="device-list" class="device-list"></div>
-            <p class="hint foot-hint">蓝牙 MIDI：先在系统蓝牙设置里配对手柄，再回到这里点「扫描设备」。</p>
+            <div class="device-foot">
+                <button id="btn-rescan" type="button" class="primary scan-btn">刷新手柄列表</button>
+                <p class="hint">请先在系统「设置 → 蓝牙」中配对手柄（如 MIDI14、MIDI21）并保持<strong>已连接</strong>；点刷新时若弹出「附近的设备/蓝牙」权限请务必允许，并等待约 2～10 秒。</p>
+            </div>
         </section>
 
         <section id="pane-sound" class="tab-pane">
@@ -82,15 +81,12 @@
                 <h2>音源（SF2 / SF3 / DLS）</h2>
                 <button id="btn-load-bank" class="mini">载入音源</button>
             </div>
-            <p class="hint">拖拽 .sf2/.sf3/.dls 文件到窗口即可载入；排在上方者优先匹配。</p>
+            <p class="hint">点「载入音源」选择 .sf2 / .sf3 / .dls；桌面端也可拖拽到窗口。排在上方者优先匹配。</p>
             <div id="bank-list" class="bank-list"></div>
             <p id="bank-count" class="hint"></p>
         </section>
 
         <section id="pane-more" class="tab-pane">
-            <div class="pane-head">
-                <h2>设置</h2>
-            </div>
             <div class="panel">
                 <div class="row"><label>复音上限</label>
                     <input id="voice-cap" type="range" min="32" max="512" step="16" value="160" />
@@ -111,13 +107,6 @@
         </section>
     </main>
 
-    <div class="statusbar">
-        <span>采样率 <b id="stat-rate">-</b></span>
-        <span>延迟 <b id="stat-latency">-</b></span>
-        <span>发声 <b id="stat-voices">0</b></span>
-        <span class="st-state">状态 <b id="stat-state">-</b></span>
-    </div>
-
-    <script src="dist/app.js"></script>
+    <script type="module" src="dist/boot.js"></script>
 </body>
 </html>

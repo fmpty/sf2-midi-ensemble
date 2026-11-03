@@ -1,15 +1,24 @@
 package com.sf2ensemble.synth;
 
+import android.app.Activity;
+import android.content.ContentResolver;
 import android.content.Context;
+import android.content.Intent;
 import android.content.res.AssetManager;
+import android.database.Cursor;
+import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.OpenableColumns;
+
+import androidx.activity.result.ActivityResult;
 
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
+import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
 import org.json.JSONArray;
@@ -43,6 +52,7 @@ public class SynthBridgePlugin extends Plugin {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final Map<String, Route> routes = new LinkedHashMap<>();
     private boolean bankLoaded = false;
+    private int[] bankPriority = new int[0];
 
     /* ------------------------------ native 声明 ------------------------------ */
 
@@ -57,7 +67,13 @@ public class SynthBridgePlugin extends Plugin {
         }
     }
 
-    public static native boolean nativeLoadBank(String path);
+    public static native int nativeAddBank(String path);
+
+    public static native boolean nativeRemoveBank(int index);
+
+    public static native void nativeSetBankOrder(int[] order);
+
+    public static native void nativeSetChannelBank(int channel, int bankIndex);
 
     public static native boolean nativeStart();
 
@@ -99,9 +115,11 @@ public class SynthBridgePlugin extends Plugin {
 
     public static native int nativeGetBurstFrames();
 
-    public static native int nativeGetPresetCount();
+    public static native int nativeGetBankCount();
 
-    public static native String nativeGetPresetInfo(int index);
+    public static native int nativeGetPresetCount(int bankIndex);
+
+    public static native String nativeGetPresetInfo(int bankIndex, int presetIndex);
 
     /* -------------------------------- 路由 -------------------------------- */
 
@@ -190,6 +208,54 @@ public class SynthBridgePlugin extends Plugin {
 
     /* ------------------------------ 插件方法 ------------------------------ */
 
+    /** 系统文件选择器：选取 SF2/SF3/DLS 并复制到应用私有目录，供 loadBank 使用 */
+    @PluginMethod
+    public void pickSoundfont(PluginCall call) {
+        if (!libOk) {
+            call.reject("原生合成库未加载（设备可能不支持 AAudio）");
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                "application/octet-stream",
+                "audio/*",
+                "*/*"
+        });
+        startActivityForResult(call, intent, "pickSoundfontResult");
+    }
+
+    @ActivityCallback
+    private void pickSoundfontResult(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        if (result.getResultCode() != Activity.RESULT_OK || result.getData() == null) {
+            JSObject canceled = new JSObject();
+            canceled.put("ok", false);
+            canceled.put("canceled", true);
+            call.resolve(canceled);
+            return;
+        }
+        Uri uri = result.getData().getData();
+        if (uri == null) {
+            call.reject("未获取到文件");
+            return;
+        }
+        worker.execute(() -> {
+            try {
+                String name = queryDisplayName(uri);
+                String path = copyUriToFiles(uri, sanitizeImportName(name));
+                JSObject res = new JSObject();
+                res.put("ok", true);
+                res.put("path", path);
+                res.put("name", name);
+                call.resolve(res);
+            } catch (Exception e) {
+                call.reject(e.getMessage() == null ? "复制音源失败" : e.getMessage());
+            }
+        });
+    }
+
     /** 载入音源：path 为空时自动取 APK 内置 assets 里的 SF2 */
     @PluginMethod
     public void loadBank(final PluginCall call) {
@@ -201,23 +267,73 @@ public class SynthBridgePlugin extends Plugin {
         worker.execute(() -> {
             String target = null;
             boolean ok = false;
+            int bankIndex = -1;
             String error = null;
             try {
                 target = path;
                 if (target == null || target.isEmpty()) target = copyBuiltinBank();
-                ok = target != null && nativeLoadBank(target);
+                if (target != null) bankIndex = nativeAddBank(target);
+                ok = bankIndex >= 0;
+                bankLoaded = nativeGetBankCount() > 0;
             } catch (Throwable t) {
-                // 防止 JNI 签名错配等异常直接炸掉进程
                 error = String.valueOf(t);
                 android.util.Log.e("SynthBridge", "载入音源异常", t);
             }
-            bankLoaded = ok;
             JSObject res = new JSObject();
             res.put("ok", ok);
             res.put("path", target == null ? "" : target);
-            res.put("presets", ok ? nativeGetPresetCount() : 0);
+            res.put("bankIndex", bankIndex);
+            res.put("bankCount", nativeGetBankCount());
+            res.put("presets", ok ? nativeGetPresetCount(bankIndex) : 0);
             if (error != null) res.put("error", error);
             call.resolve(res);
+        });
+    }
+
+    @PluginMethod
+    public void removeBank(final PluginCall call) {
+        if (!libOk) {
+            call.reject("原生合成库未加载");
+            return;
+        }
+        final int index = call.getInt("index", -1);
+        worker.execute(() -> {
+            boolean ok = nativeRemoveBank(index);
+            bankLoaded = nativeGetBankCount() > 0;
+            if (ok && bankPriority.length > 0) {
+                java.util.ArrayList<Integer> next = new java.util.ArrayList<>();
+                for (int o : bankPriority) {
+                    if (o == index) continue;
+                    next.add(o > index ? o - 1 : o);
+                }
+                bankPriority = new int[next.size()];
+                for (int i = 0; i < next.size(); i++) bankPriority[i] = next.get(i);
+                nativeSetBankOrder(bankPriority);
+            }
+            JSObject res = new JSObject();
+            res.put("ok", ok);
+            res.put("bankCount", nativeGetBankCount());
+            call.resolve(res);
+        });
+    }
+
+    @PluginMethod
+    public void setBankOrder(final PluginCall call) {
+        if (!libOk) {
+            call.reject("原生合成库未加载");
+            return;
+        }
+        final String json = call.getString("order", "[]");
+        worker.execute(() -> {
+            try {
+                JSONArray arr = new JSONArray(json);
+                bankPriority = new int[arr.length()];
+                for (int i = 0; i < arr.length(); i++) bankPriority[i] = arr.getInt(i);
+                nativeSetBankOrder(bankPriority);
+                call.resolve();
+            } catch (Exception e) {
+                call.reject(e.getMessage());
+            }
         });
     }
 
@@ -324,6 +440,9 @@ public class SynthBridgePlugin extends Plugin {
     @PluginMethod
     public void setChannel(PluginCall call) {
         int ch = clampChannel(call.getInt("channel", 0));
+        if (call.getData().has("bankIndex")) {
+            nativeSetChannelBank(ch, call.getInt("bankIndex", 0));
+        }
         if (call.getData().has("program")) {
             nativeProgramChange(ch, clamp(call.getInt("program", 0), 0, 127),
                     call.getBoolean("isDrum", false) ? 1 : 0);
@@ -345,22 +464,30 @@ public class SynthBridgePlugin extends Plugin {
 
     @PluginMethod
     public void getPresets(PluginCall call) {
-        int count = nativeGetPresetCount();
+        int bankCount = nativeGetBankCount();
         JSArray arr = new JSArray();
-        for (int i = 0; i < count; i++) {
-            String info = nativeGetPresetInfo(i);
-            if (info == null || info.isEmpty()) continue;
-            String[] parts = info.split("\\|");
-            if (parts.length < 3) continue;
-            try {
-                int bank = Integer.parseInt(parts[1]);
-                JSObject o = new JSObject();
-                o.put("name", parts[0]);
-                o.put("bankMSB", (bank >> 7) & 0x7f);
-                o.put("bankLSB", bank & 0x7f);
-                o.put("program", Integer.parseInt(parts[2]));
-                arr.put(o);
-            } catch (NumberFormatException ignored) {
+        int[] order = bankPriority.length > 0 ? bankPriority : null;
+        for (int o = 0; o < bankCount; o++) {
+            int bankIndex = order != null && o < order.length ? order[o] : o;
+            if (bankIndex < 0 || bankIndex >= bankCount) continue;
+            int presetCount = nativeGetPresetCount(bankIndex);
+            for (int i = 0; i < presetCount; i++) {
+                String info = nativeGetPresetInfo(bankIndex, i);
+                if (info == null || info.isEmpty()) continue;
+                String[] parts = info.split("\\|");
+                if (parts.length < 3) continue;
+                try {
+                    int bank = Integer.parseInt(parts[1]);
+                    JSObject preset = new JSObject();
+                    preset.put("name", parts[0]);
+                    preset.put("bankMSB", (bank >> 7) & 0x7f);
+                    preset.put("bankLSB", bank & 0x7f);
+                    preset.put("program", Integer.parseInt(parts[2]));
+                    preset.put("bankId", "native" + bankIndex);
+                    preset.put("isDrum", bank >= 128);
+                    arr.put(preset);
+                } catch (NumberFormatException ignored) {
+                }
             }
         }
         JSObject res = new JSObject();
@@ -384,6 +511,46 @@ public class SynthBridgePlugin extends Plugin {
     }
 
     /* ------------------------------ 内置音源 ------------------------------ */
+
+    private static String sanitizeImportName(String name) {
+        if (name == null || name.isEmpty()) return "imported.sf2";
+        String safe = name.replaceAll("[^a-zA-Z0-9._\\-]", "_");
+        if (safe.isEmpty()) safe = "imported.sf2";
+        String lower = safe.toLowerCase();
+        if (!lower.endsWith(".sf2") && !lower.endsWith(".sf3") && !lower.endsWith(".dls")) {
+            safe = safe + ".sf2";
+        }
+        return safe;
+    }
+
+    private String queryDisplayName(Uri uri) {
+        ContentResolver cr = getContext().getContentResolver();
+        try (Cursor c = cr.query(uri, null, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0) {
+                    String n = c.getString(idx);
+                    if (n != null && !n.isEmpty()) return n;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return "imported.sf2";
+    }
+
+    private String copyUriToFiles(Uri uri, String fileName) throws java.io.IOException {
+        Context ctx = getContext();
+        if (ctx == null) throw new java.io.IOException("无 Context");
+        ContentResolver cr = ctx.getContentResolver();
+        File out = new File(ctx.getFilesDir(), fileName);
+        try (InputStream in = cr.openInputStream(uri); OutputStream os = new FileOutputStream(out)) {
+            if (in == null) throw new java.io.IOException("无法读取所选文件");
+            byte[] buf = new byte[256 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+        }
+        return out.getAbsolutePath();
+    }
 
     /** 把 APK assets 里的 SF2 复制到内部存储（native 层只能读文件路径） */
     private String copyBuiltinBank() {

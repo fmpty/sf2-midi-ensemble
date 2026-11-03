@@ -8,7 +8,10 @@ import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanFilter;
 import android.bluetooth.le.ScanResult;
 import android.bluetooth.le.ScanSettings;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.media.midi.MidiDevice;
 import android.media.midi.MidiDeviceInfo;
@@ -28,9 +31,12 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -55,6 +61,8 @@ public class MidiBridgePlugin extends Plugin {
     private BluetoothLeScanner scanner;
     private boolean scanning = false;
     private Runnable pendingAction;
+    private BroadcastReceiver btStateReceiver;
+    private boolean btReceiverRegistered;
 
     @Override
     public void load() {
@@ -66,6 +74,43 @@ public class MidiBridgePlugin extends Plugin {
         if (midiManager != null) {
             midiManager.registerDeviceCallback(deviceCallback, mainHandler);
         }
+        registerBluetoothStateReceiver(ctx);
+    }
+
+    private void registerBluetoothStateReceiver(Context ctx) {
+        if (btReceiverRegistered || ctx == null) return;
+        btStateReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (intent == null) return;
+                String action = intent.getAction();
+                if (BluetoothDevice.ACTION_ACL_DISCONNECTED.equals(action)) {
+                    BluetoothDevice dev;
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        dev = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice.class);
+                    } else {
+                        dev = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                    }
+                    if (dev != null) {
+                        mainHandler.post(() -> handleBluetoothDisconnected(dev.getAddress()));
+                    }
+                } else if (BluetoothDevice.ACTION_ACL_CONNECTED.equals(action)) {
+                    mainHandler.post(() -> {
+                        openAllSystemMidi();
+                        emitDevices();
+                    });
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED);
+        filter.addAction(BluetoothDevice.ACTION_ACL_CONNECTED);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ctx.registerReceiver(btStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            ctx.registerReceiver(btStateReceiver, filter);
+        }
+        btReceiverRegistered = true;
     }
 
     private final MidiManager.DeviceCallback deviceCallback = new MidiManager.DeviceCallback() {
@@ -103,6 +148,113 @@ public class MidiBridgePlugin extends Plugin {
         return info.getType() + "#" + info.getId();
     }
 
+    private static String macFromAddr(String addr) {
+        if (addr == null) return "";
+        return addr.toUpperCase(Locale.US);
+    }
+
+    private static void putMac(JSObject obj, String addr) {
+        if (addr != null && !addr.isEmpty()) obj.put("mac", macFromAddr(addr));
+    }
+
+    private static String btKeyFromAddr(String addr) {
+        if (addr == null) return null;
+        return "bt#" + addr.replace(":", "").toUpperCase(Locale.US);
+    }
+
+    /** 系统蓝牙断开：移除 bt# 及同 MAC 的 type# 缓存，避免 WebView 仍显示已连接 */
+    private void handleBluetoothDisconnected(String addr) {
+        if (addr == null || addr.isEmpty()) return;
+        String norm = macFromAddr(addr);
+        String btKey = btKeyFromAddr(addr);
+        if (btKey != null) closeDevice(btKey);
+        for (String key : new ArrayList<>(meta.keySet())) {
+            JSObject m = meta.get(key);
+            if (m == null) continue;
+            String mac = m.optString("mac", "");
+            if (!mac.isEmpty() && mac.equalsIgnoreCase(norm)) {
+                closeDevice(key);
+            }
+        }
+        emitDevices();
+    }
+
+    private String macFromMidiInfo(MidiDeviceInfo info) {
+        if (info == null || info.getType() != MidiDeviceInfo.TYPE_BLUETOOTH) return "";
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return "";
+        try {
+            BluetoothDevice bt;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                bt = info.getProperties().getParcelable(MidiDeviceInfo.PROPERTY_BLUETOOTH_DEVICE, BluetoothDevice.class);
+            } else {
+                bt = info.getProperties().getParcelable(MidiDeviceInfo.PROPERTY_BLUETOOTH_DEVICE);
+            }
+            if (bt != null && bt.getAddress() != null) return macFromAddr(bt.getAddress());
+        } catch (Exception ignored) {
+        }
+        return "";
+    }
+
+    /** 与 MidiManager 列表对齐；蓝牙断开主要靠 ACL 广播，此处清掉已不在系统 MIDI 里的 bt# 缓存 */
+    private void syncDeviceListState() {
+        if (midiManager == null) return;
+        MidiDeviceInfo[] infos = midiManager.getDevices();
+        Set<String> systemKeys = new HashSet<>();
+        Set<String> activeMacs = new HashSet<>();
+        if (infos != null) {
+            for (MidiDeviceInfo info : infos) {
+                systemKeys.add(keyFor(info));
+                String mac = macFromMidiInfo(info);
+                if (!mac.isEmpty()) activeMacs.add(mac);
+            }
+        }
+        for (String key : new ArrayList<>(meta.keySet())) {
+            if (!key.startsWith("bt#") && !systemKeys.contains(key)) {
+                closeDevice(key);
+            }
+        }
+        for (String key : new ArrayList<>(meta.keySet())) {
+            if (!key.startsWith("bt#")) continue;
+            JSObject m = meta.get(key);
+            if (m == null) continue;
+            String mac = m.optString("mac", "");
+            if (mac.isEmpty()) continue;
+            if (!activeMacs.contains(mac.toUpperCase(Locale.US))) {
+                closeDevice(key);
+            }
+        }
+    }
+
+    private boolean hasBluetoothPermission() {
+        if (getActivity() == null) return false;
+        for (String p : neededPermissions()) {
+            if (getActivity().checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** 蓝牙配对列表里只尝试名称含 midi 的设备（大小写不限） */
+    private static boolean looksLikeMidiController(String name) {
+        return name != null && !name.isEmpty() && name.toLowerCase(Locale.US).contains("midi");
+    }
+
+    private static boolean shouldExposeDevice(JSObject o) {
+        if (o == null) return false;
+        if (!"bluetooth".equals(o.optString("type", ""))) return true;
+        String name = o.optString("name", "");
+        return name.toLowerCase(Locale.US).contains("midi");
+    }
+
+    private String safeDeviceName(BluetoothDevice dev) {
+        try {
+            return dev.getName();
+        } catch (SecurityException e) {
+            return null;
+        }
+    }
+
     private void openInfo(MidiDeviceInfo info) {
         if (midiManager == null) return;
         final String key = keyFor(info);
@@ -117,6 +269,18 @@ public class MidiBridgePlugin extends Plugin {
         obj.put("manufacturer", manufacturer);
         obj.put("type", info.getType() == MidiDeviceInfo.TYPE_BLUETOOTH ? "bluetooth" : "usb");
         obj.put("connected", true);
+        if (info.getType() == MidiDeviceInfo.TYPE_BLUETOOTH && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                BluetoothDevice bt;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    bt = info.getProperties().getParcelable(MidiDeviceInfo.PROPERTY_BLUETOOTH_DEVICE, BluetoothDevice.class);
+                } else {
+                    bt = info.getProperties().getParcelable(MidiDeviceInfo.PROPERTY_BLUETOOTH_DEVICE);
+                }
+                if (bt != null) putMac(obj, bt.getAddress());
+            } catch (Exception ignored) {
+            }
+        }
         meta.put(key, obj);
         midiManager.openDevice(info, device -> {
             if (device == null) {
@@ -144,6 +308,7 @@ public class MidiBridgePlugin extends Plugin {
         obj.put("manufacturer", "");
         obj.put("type", "bluetooth");
         obj.put("connected", true);
+        putMac(obj, addr);
         meta.put(key, obj);
         midiManager.openBluetoothDevice(dev, device -> {
             if (device == null) {
@@ -158,7 +323,12 @@ public class MidiBridgePlugin extends Plugin {
     /** 打开设备的输出端口（设备 → 主机），并挂上接收器 */
     private void attachOutputPort(final String key, MidiDevice device) {
         opened.put(key, device);
-        MidiOutputPort port = device.openOutputPort(0);
+        MidiOutputPort port = null;
+        int outputs = device.getInfo().getOutputPortCount();
+        for (int i = 0; i < outputs; i++) {
+            port = device.openOutputPort(i);
+            if (port != null) break;
+        }
         if (port == null) {
             JSObject m = meta.get(key);
             if (m != null) m.put("connected", false);
@@ -198,8 +368,11 @@ public class MidiBridgePlugin extends Plugin {
     }
 
     private JSArray deviceArray() {
+        syncDeviceListState();
         JSArray arr = new JSArray();
-        for (JSObject o : meta.values()) arr.put(o);
+        for (JSObject o : meta.values()) {
+            if (shouldExposeDevice(o)) arr.put(o);
+        }
         return arr;
     }
 
@@ -217,6 +390,10 @@ public class MidiBridgePlugin extends Plugin {
     }
 
     private void ensureBluetoothPermissions(final Runnable action) {
+        if (getActivity() == null) {
+            action.run();
+            return;
+        }
         List<String> missing = new ArrayList<>();
         for (String p : neededPermissions()) {
             if (getActivity().checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) {
@@ -241,6 +418,59 @@ public class MidiBridgePlugin extends Plugin {
         }
     }
 
+    private int openAllSystemMidi() {
+        if (midiManager == null) return 0;
+        MidiDeviceInfo[] infos = midiManager.getDevices();
+        int n = 0;
+        if (infos != null) {
+            for (MidiDeviceInfo info : infos) {
+                openInfo(info);
+                n++;
+            }
+        }
+        return n;
+    }
+
+    /** 系统蓝牙已配对、但尚未出现在 getDevices() 的 MIDI 手柄 */
+    private int openBondedMidiControllers() {
+        if (midiManager == null || !hasBluetoothPermission()) return 0;
+        Context ctx = getContext();
+        if (ctx == null) return 0;
+        BluetoothManager bm = (BluetoothManager) ctx.getSystemService(Context.BLUETOOTH_SERVICE);
+        if (bm == null || bm.getAdapter() == null) return 0;
+        Set<BluetoothDevice> bonded;
+        try {
+            bonded = bm.getAdapter().getBondedDevices();
+        } catch (SecurityException e) {
+            return 0;
+        }
+        if (bonded == null || bonded.isEmpty()) return 0;
+        int n = 0;
+        for (BluetoothDevice dev : bonded) {
+            String addr = dev.getAddress();
+            if (addr == null) continue;
+            String key = "bt#" + addr.replace(":", "");
+            if (meta.containsKey(key) || opened.containsKey(key)) continue;
+            if (!looksLikeMidiController(safeDeviceName(dev))) continue;
+            openBluetooth(dev, addr);
+            n++;
+        }
+        return n;
+    }
+
+    private void finishOpenAll(PluginCall call) {
+        emitDevices();
+        JSObject res = new JSObject();
+        res.put("devices", deviceArray());
+        if (midiManager != null) {
+            MidiDeviceInfo[] infos = midiManager.getDevices();
+            res.put("systemCount", infos == null ? 0 : infos.length);
+        } else {
+            res.put("systemCount", 0);
+        }
+        call.resolve(res);
+    }
+
     @PluginMethod
     public void getDevices(PluginCall call) {
         JSObject res = new JSObject();
@@ -248,20 +478,23 @@ public class MidiBridgePlugin extends Plugin {
         call.resolve(res);
     }
 
-    /** 打开系统当前可见的所有 MIDI 设备（USB + 已配对的蓝牙） */
+    /** 打开系统当前可见的所有 MIDI 设备（USB + 系统蓝牙已配对的 MIDI 手柄） */
     @PluginMethod
     public void openAll(PluginCall call) {
-        if (midiManager != null) {
-            MidiDeviceInfo[] infos = midiManager.getDevices();
-            if (infos != null) {
-                for (MidiDeviceInfo info : infos) openInfo(info);
-            }
+        if (midiManager == null) {
+            finishOpenAll(call);
+            return;
         }
-        mainHandler.postDelayed(() -> {
-            JSObject res = new JSObject();
-            res.put("devices", deviceArray());
-            call.resolve(res);
-        }, 600);
+        Runnable work = () -> {
+            openAllSystemMidi();
+            openBondedMidiControllers();
+            mainHandler.postDelayed(() -> {
+                openAllSystemMidi();
+                openBondedMidiControllers();
+                finishOpenAll(call);
+            }, 1400);
+        };
+        ensureBluetoothPermissions(work);
     }
 
     /** 扫描蓝牙 MIDI（BLE-MIDI）设备并打开 */
@@ -313,6 +546,14 @@ public class MidiBridgePlugin extends Plugin {
 
     @Override
     public void handleOnDestroy() {
+        Context ctx = getContext();
+        if (btReceiverRegistered && ctx != null && btStateReceiver != null) {
+            try {
+                ctx.unregisterReceiver(btStateReceiver);
+            } catch (Exception ignored) {
+            }
+            btReceiverRegistered = false;
+        }
         for (String key : new ArrayList<>(meta.keySet())) closeDevice(key);
         super.handleOnDestroy();
     }

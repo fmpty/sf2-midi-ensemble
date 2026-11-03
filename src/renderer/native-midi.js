@@ -29,9 +29,15 @@ export function isNativeMidiAvailable() {
 }
 
 function toDev(d) {
+    const id = String(d.id);
+    let mac = d.mac ? String(d.mac) : '';
+    if (!mac && id.startsWith('bt#') && id.length >= 15) {
+        mac = id.slice(3).match(/.{2}/g).join(':').toUpperCase();
+    }
     return {
-        id: String(d.id),
-        name: d.name || String(d.id),
+        id,
+        mac,
+        name: d.name || id,
         manufacturer: d.manufacturer || '',
         state: d.connected === false ? 'disconnected' : 'connected',
         connection: 'open',
@@ -79,10 +85,24 @@ export class NativeMidiHub {
     async rescan() {
         const p = nativeMidiPlugin();
         if (!p) return;
-        // Android 需要扫描蓝牙 MIDI 设备；iOS 由系统自动接入，scanBle 为空实现
-        if (typeof p.scanBle === 'function') await p.scanBle().catch(() => {});
-        await p.openAll().catch(() => {});
+        let first = null;
+        try {
+            first = await p.openAll();
+        } catch (e) {
+            this.onError(e);
+        }
         await this.refresh();
+        const systemCount = first && first.systemCount != null ? first.systemCount : 0;
+        if (this.devices.length === 0 && systemCount > 0) {
+            await new Promise((r) => setTimeout(r, 600));
+            await p.openAll().catch((e) => this.onError(e));
+            await this.refresh();
+        }
+        if (this.devices.length === 0 && systemCount === 0 && typeof p.scanBle === 'function') {
+            await p.scanBle().catch((e) => this.onError(e));
+            await p.openAll().catch((e) => this.onError(e));
+            await this.refresh();
+        }
     }
 
     async refresh() {

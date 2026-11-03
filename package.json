@@ -12,7 +12,7 @@
     "watch": "node scripts/build.js --watch",
     "start": "node scripts/build.js && electron .",
     "smoke": "node scripts/build.js && electron tools/smoke.js",
-    "dist": "node scripts/build.js && electron-builder",
+    "dist": "node scripts/build.js && node scripts/pre-electron-dist.js && node scripts/run-electron-builder.js && node scripts/clean-stale-win-dist.js",
     "mobile:sync": "node scripts/build.js && npx cap sync && node scripts/sync-native.js",
     "mobile:android": "npm run mobile:sync && node scripts/build-android.js",
     "mobile:ios": "npm run mobile:sync && npx cap open ios"
@@ -41,12 +41,14 @@
       "package.json"
     ],
     "asar": true,
+    "disableAsarIntegrity": true,
     "mac": {
       "category": "public.app-category.music",
       "target": "dmg"
     },
     "win": {
-      "target": "nsis"
+      "target": "dir",
+      "signExecutable": false
     },
     "linux": {
       "target": "AppImage",

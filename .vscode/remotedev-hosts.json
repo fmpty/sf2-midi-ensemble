@@ -15,7 +15,7 @@
       "remoteBasePath": "D:/users/tjl",
       "runCommand": ".vscode/build_local.bat",
       "localCommand": ".vscode/build_android.bat",
-      "localCommand1": ""
+      "localCommand1": ".vscode/adb_install.bat"
     }
   ]
 }

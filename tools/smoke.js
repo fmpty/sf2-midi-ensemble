@@ -113,7 +113,7 @@ app.whenReady().then(async () => {
             presets: e ? e.engine.presets.length : 0,
             cards: document.querySelectorAll('.card').length,
             bankInfo: document.getElementById('bank-count').textContent,
-            midiStatus: document.getElementById('midi-status').textContent,
+            midiStatus: document.getElementById('midi-status')?.textContent ?? '',
             logLines: [...document.querySelectorAll('.log-line')].slice(0, 12).map(x => x.textContent)
         }, null, 2);
     })()`);

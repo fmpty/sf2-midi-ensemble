@@ -56,6 +56,18 @@ export function noteName(midi) {
     return `${NOTE_NAMES[n % 12]}${Math.floor(n / 12) - 1}`;
 }
 
+const BLACK_PCS = new Set([1, 3, 6, 8, 10]);
+
+/** 屏幕钢琴键角标：白键 C5，黑键 C5#（不用打击乐名称占位） */
+export function noteNameOnKey(midi) {
+    const n = Math.max(0, Math.min(127, Math.round(midi)));
+    const pc = n % 12;
+    const oct = Math.floor(n / 12) - 1;
+    const letter = NOTE_NAMES[pc].replace('#', '');
+    if (BLACK_PCS.has(pc)) return `${letter}${oct}#`;
+    return `${letter}${oct}`;
+}
+
 export function programLabel(program) {
     const p = GM_PROGRAMS[Math.max(0, Math.min(127, program))];
     return p ? `${program + 1}. ${p[0]}` : `程序 ${program}`;

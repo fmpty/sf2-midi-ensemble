@@ -128,9 +128,18 @@ function prepareAndroidProject() {
         'assembleDebug',
         '--init-script', path.join(ROOT, 'scripts', 'gradle-mirrors.gradle'),
     ];
+    const toolOpts = '-Dfile.encoding=UTF-8 -Duser.language=en -Duser.country=US';
+    const prevTool = process.env.JAVA_TOOL_OPTIONS || '';
+    const javaToolOptions = prevTool ? `${prevTool} ${toolOpts}` : toolOpts;
     const ok = run(args[0], args.slice(1), {
         cwd: androidDir,
-        env: { ...process.env, JAVA_HOME: javaHome, ANDROID_HOME: process.env.ANDROID_HOME || path.join(process.env.LOCALAPPDATA || '', 'Android', 'Sdk') },
+        env: {
+            ...process.env,
+            JAVA_HOME: javaHome,
+            ANDROID_HOME: process.env.ANDROID_HOME || path.join(process.env.LOCALAPPDATA || '', 'Android', 'Sdk'),
+            JAVA_TOOL_OPTIONS: javaToolOptions,
+            GRADLE_OPTS: (process.env.GRADLE_OPTS || '') + ' -Dorg.gradle.console=plain',
+        },
     });
     const apk = path.join(androidDir, 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk');
     if (ok && fs.existsSync(apk)) {

@@ -2,8 +2,7 @@
  * 原生合成引擎（Android）：AAudio 低延迟输出 + TinySoundFont 合成 SF2。
  *
  * 设计要点：
- * - 输出用 AAudio：EXCLUSIVE 共享模式 + LOW_LATENCY 性能模式，缓冲取一个 burst（通常 48~192 帧），
- *   端到端延迟一般在 10~20 ms，远低于 WebView 的 WebAudio（部分机型 300~400 ms 的深度缓冲）。
+ * - 输出用 AAudio：默认 SHARED（与系统其它播放器共存）；缓冲约 2~3 个 burst，避免欠载丢音。
  * - TinySoundFont 不是线程安全的：所有音符/控制事件先写入无锁环形队列，
  *   由音频回调线程统一取出并交给 TSF，tsf 实例只在回调线程被访问。
  * - 通道 9 或显式指定时按鼓组（bank 128）取音色。
@@ -17,6 +16,8 @@
 #include <cmath>
 #include <cstring>
 #include <new>
+#include <vector>
+#include <algorithm>
 
 #define TSF_IMPLEMENTATION
 #include "vendor/tsf.h"
@@ -56,8 +57,15 @@ MidiEvent g_queue[QUEUE_SIZE];
 std::atomic<int> g_write{0};
 std::atomic<int> g_read{0};
 
-tsf *g_synth = nullptr;
+struct LoadedBank {
+    tsf *font = nullptr;
+};
+
+std::vector<LoadedBank> g_banks;
+std::vector<int> g_bankOrder;
+int g_channelBank[16] = {0};
 AAudioStream *g_stream = nullptr;
+static thread_local std::vector<float> g_mixScratch;
 std::atomic<int> g_sampleRate{48000};
 std::atomic<int> g_framesPerBurst{0};
 std::atomic<int> g_bufferFrames{0};
@@ -66,9 +74,13 @@ std::atomic<float> g_master{0.9f};
 std::atomic<float> g_reverb{0.0f};
 
 void pushEvent(const MidiEvent &e) {
-    const int w = g_write.load(std::memory_order_relaxed);
-    const int next = (w + 1) & MAX_QUEUE_MASK;
-    if (next == g_read.load(std::memory_order_acquire)) return; // 满：丢弃最旧的声音事件，避免阻塞
+    int w = g_write.load(std::memory_order_relaxed);
+    int r = g_read.load(std::memory_order_acquire);
+    int next = (w + 1) & MAX_QUEUE_MASK;
+    if (next == r) {
+        r = (r + 1) & MAX_QUEUE_MASK;
+        g_read.store(r, std::memory_order_release);
+    }
     g_queue[w] = e;
     g_write.store(next, std::memory_order_release);
 }
@@ -190,14 +202,47 @@ void applyEvent(tsf *f, const MidiEvent &e) {
     }
 }
 
-void drainEvents(tsf *f) {
+tsf *fontForChannel(int ch) {
+    ch &= 15;
+    if (g_banks.empty()) return nullptr;
+    int bi = g_channelBank[ch];
+    if (bi < 0 || bi >= (int)g_banks.size()) bi = 0;
+    return g_banks[(size_t)bi].font;
+}
+
+void applyEventRouted(const MidiEvent &e) {
+    if (e.type == EV_ALL_NOTES_OFF) {
+        for (auto &b : g_banks) {
+            if (b.font) tsf_note_off_all(b.font);
+        }
+        return;
+    }
+    if (e.type == EV_VOICE_CAP) {
+        for (auto &b : g_banks) {
+            if (b.font) tsf_set_max_voices(b.font, e.a);
+        }
+        return;
+    }
+    tsf *f = fontForChannel(e.ch);
+    if (!f) return;
+    applyEvent(f, e);
+}
+
+void drainEvents() {
     const int w = g_write.load(std::memory_order_acquire);
     int r = g_read.load(std::memory_order_relaxed);
     while (r != w) {
-        applyEvent(f, g_queue[r]);
+        applyEventRouted(g_queue[r]);
         r = (r + 1) & MAX_QUEUE_MASK;
     }
     g_read.store(r, std::memory_order_release);
+}
+
+void setOutputRateOnAllBanks(int rate) {
+    if (rate <= 0) rate = 48000;
+    for (auto &b : g_banks) {
+        if (b.font) tsf_set_output(b.font, TSF_STEREO_INTERLEAVED, rate, 0);
+    }
 }
 
 /* --------------------------------- AAudio 回调 --------------------------------- */
@@ -208,13 +253,21 @@ aaudio_data_callback_result_t dataCallback(AAudioStream *stream, void *userData,
     (void)userData;
     float *out = static_cast<float *>(audioData);
     const int samples = numFrames * 2;
-    tsf *f = g_synth;
-    if (!f) {
+    if (g_banks.empty()) {
         memset(out, 0, samples * sizeof(float));
         return AAUDIO_CALLBACK_RESULT_CONTINUE;
     }
-    drainEvents(f);
-    tsf_render_float(f, out, numFrames, 0);
+    drainEvents();
+    memset(out, 0, (size_t)samples * sizeof(float));
+    if ((int)g_mixScratch.size() < samples) g_mixScratch.resize((size_t)samples);
+    int voices = 0;
+    for (auto &b : g_banks) {
+        if (!b.font) continue;
+        memset(g_mixScratch.data(), 0, (size_t)samples * sizeof(float));
+        tsf_render_float(b.font, g_mixScratch.data(), numFrames, 0);
+        for (int i = 0; i < samples; i++) out[i] += g_mixScratch[i];
+        voices += tsf_active_voice_count(b.font);
+    }
 
     const float wet = g_reverb.load(std::memory_order_relaxed);
     if (wet > 0.001f) applyReverb(out, numFrames, 2, wet);
@@ -223,7 +276,7 @@ aaudio_data_callback_result_t dataCallback(AAudioStream *stream, void *userData,
     if (vol < 0.999f || vol > 1.001f) {
         for (int i = 0; i < samples; i++) out[i] *= vol;
     }
-    g_voices.store(tsf_active_voice_count(f), std::memory_order_relaxed);
+    g_voices.store(voices, std::memory_order_relaxed);
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 
@@ -239,23 +292,17 @@ bool openStream() {
 
     AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_OUTPUT);
     AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
-    AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_EXCLUSIVE);
+    AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
     AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_FLOAT);
     AAudioStreamBuilder_setChannelCount(builder, 2);
     AAudioStreamBuilder_setSampleRate(builder, AAUDIO_UNSPECIFIED);
-    AAudioStreamBuilder_setUsage(builder, AAUDIO_USAGE_GAME);
+    AAudioStreamBuilder_setUsage(builder, AAUDIO_USAGE_MEDIA);
     AAudioStreamBuilder_setContentType(builder, AAUDIO_CONTENT_TYPE_MUSIC);
     AAudioStreamBuilder_setDataCallback(builder, dataCallback, nullptr);
     AAudioStreamBuilder_setErrorCallback(builder, errorCallback, nullptr);
 
     AAudioStream *stream = nullptr;
     aaudio_result_t r = AAudioStreamBuilder_openStream(builder, &stream);
-    if (r != AAUDIO_OK || !stream) {
-        // 独占模式可能被占用，退回共享模式
-        LOGI("独占模式打开失败（%d），改用共享模式", r);
-        AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
-        r = AAudioStreamBuilder_openStream(builder, &stream);
-    }
     AAudioStreamBuilder_delete(builder);
     if (r != AAUDIO_OK || !stream) {
         LOGE("AAudio 打开失败：%d", r);
@@ -267,13 +314,16 @@ bool openStream() {
     g_sampleRate.store(rate > 0 ? rate : 48000, std::memory_order_relaxed);
     g_framesPerBurst.store(burst > 0 ? burst : 0, std::memory_order_relaxed);
 
-    if (g_synth) {
-        tsf_set_output(g_synth, TSF_STEREO_INTERLEAVED, g_sampleRate.load(std::memory_order_relaxed), 0);
-    }
+    setOutputRateOnAllBanks(g_sampleRate.load(std::memory_order_relaxed));
 
-    // 缓冲压到一个 burst：这是低延迟的关键（系统允许的最小值）
     if (burst > 0) {
-        AAudioStream_setBufferSizeInFrames(stream, burst);
+        const int32_t rateHz = rate > 0 ? rate : 48000;
+        /* 大 burst 平板不必再叠 3 倍；总缓冲上限约 16 ms，兼顾稳定与延迟 */
+        int32_t buf = burst >= 256 ? (burst + burst / 2) : (burst * 2);
+        if (buf < burst + 64) buf = burst + 64;
+        const int32_t capFrames = (rateHz * 16) / 1000;
+        if (capFrames > burst && buf > capFrames) buf = capFrames;
+        AAudioStream_setBufferSizeInFrames(stream, buf);
     }
     g_bufferFrames.store(AAudioStream_getBufferSizeInFrames(stream), std::memory_order_relaxed);
 
@@ -294,24 +344,70 @@ bool openStream() {
 
 extern "C" {
 
-JNIEXPORT jboolean JNICALL
-Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeLoadBank(JNIEnv *env, jclass, jstring jpath) {
+JNIEXPORT jint JNICALL
+Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeAddBank(JNIEnv *env, jclass, jstring jpath) {
     const char *path = env->GetStringUTFChars(jpath, nullptr);
-    if (!path) return JNI_FALSE;
+    if (!path) return -1;
     tsf *loaded = tsf_load_filename(path);
     env->ReleaseStringUTFChars(jpath, path);
     if (!loaded) {
         LOGE("音源加载失败");
-        return JNI_FALSE;
+        return -1;
     }
-    tsf *old = g_synth;
-    g_synth = loaded;
-    tsf_set_output(loaded, TSF_STEREO_INTERLEAVED, g_sampleRate.load(std::memory_order_relaxed), 0);
+    const int rate = g_sampleRate.load(std::memory_order_relaxed);
+    tsf_set_output(loaded, TSF_STEREO_INTERLEAVED, rate > 0 ? rate : 48000, 0);
     tsf_set_max_voices(loaded, 96);
     for (int ch = 0; ch < 16; ch++) tsf_channel_set_presetnumber(loaded, ch, 0, ch == 9 ? 1 : 0);
-    if (old) tsf_close(old);
-    LOGI("音源已加载：%d 个预设", tsf_get_presetcount(loaded));
+    LoadedBank slot;
+    slot.font = loaded;
+    g_banks.push_back(slot);
+    const int index = (int)g_banks.size() - 1;
+    g_bankOrder.push_back(index);
+    LOGI("音源已加入 #%d：%d 个预设，共 %d 个音源", index, tsf_get_presetcount(loaded), (int)g_banks.size());
+    return index;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeRemoveBank(JNIEnv *, jclass, jint index) {
+    if (index < 0 || index >= (int)g_banks.size()) return JNI_FALSE;
+    if (g_banks.size() <= 1) return JNI_FALSE;
+    if (g_banks[(size_t)index].font) tsf_close(g_banks[(size_t)index].font);
+    g_banks.erase(g_banks.begin() + index);
+    std::vector<int> newOrder;
+    for (int o : g_bankOrder) {
+        if (o == index) continue;
+        newOrder.push_back(o > index ? o - 1 : o);
+    }
+    if (newOrder.empty() && !g_banks.empty()) newOrder.push_back(0);
+    g_bankOrder = newOrder;
+    for (int i = 0; i < 16; i++) {
+        if (g_channelBank[i] == index) g_channelBank[i] = 0;
+        else if (g_channelBank[i] > index) g_channelBank[i]--;
+    }
     return JNI_TRUE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeSetBankOrder(JNIEnv *env, jclass, jintArray jorder) {
+    if (!jorder) return;
+    const jsize len = env->GetArrayLength(jorder);
+    if (len <= 0) return;
+    jint *els = env->GetIntArrayElements(jorder, nullptr);
+    if (!els) return;
+    g_bankOrder.clear();
+    for (jsize i = 0; i < len; i++) {
+        const int idx = els[i];
+        if (idx >= 0 && idx < (int)g_banks.size()) g_bankOrder.push_back(idx);
+    }
+    env->ReleaseIntArrayElements(jorder, els, JNI_ABORT);
+    if (g_bankOrder.empty() && !g_banks.empty()) g_bankOrder.push_back(0);
+}
+
+JNIEXPORT void JNICALL
+Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeSetChannelBank(JNIEnv *, jclass, jint ch, jint bankIndex) {
+    ch &= 15;
+    if (bankIndex < 0 || bankIndex >= (int)g_banks.size()) bankIndex = 0;
+    g_channelBank[ch] = bankIndex;
 }
 
 JNIEXPORT jboolean JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeStart(JNIEnv *, jclass) {
@@ -417,15 +513,23 @@ JNIEXPORT jint JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeGetBur
     return g_framesPerBurst.load(std::memory_order_relaxed);
 }
 
-JNIEXPORT jint JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeGetPresetCount(JNIEnv *, jclass) {
-    return g_synth ? tsf_get_presetcount(g_synth) : 0;
+JNIEXPORT jint JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeGetBankCount(JNIEnv *, jclass) {
+    return (jint)g_banks.size();
+}
+
+JNIEXPORT jint JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeGetPresetCount(JNIEnv *, jclass, jint bankIndex) {
+    if (bankIndex < 0 || bankIndex >= (int)g_banks.size() || !g_banks[(size_t)bankIndex].font) return 0;
+    return tsf_get_presetcount(g_banks[(size_t)bankIndex].font);
 }
 
 /** 返回 "名称|bank|program"（bank 为 MSB<<7|LSB），供 JS 侧构造音色列表 */
-JNIEXPORT jstring JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeGetPresetInfo(JNIEnv *env, jclass, jint index) {
-    if (!g_synth || index < 0 || index >= tsf_get_presetcount(g_synth)) return env->NewStringUTF("");
-    const char *name = tsf_get_presetname(g_synth, index);
-    const struct tsf_preset *p = &g_synth->presets[index];
+JNIEXPORT jstring JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeGetPresetInfo(JNIEnv *env, jclass, jint bankIndex,
+                                                                                    jint index) {
+    if (bankIndex < 0 || bankIndex >= (int)g_banks.size()) return env->NewStringUTF("");
+    tsf *f = g_banks[(size_t)bankIndex].font;
+    if (!f || index < 0 || index >= tsf_get_presetcount(f)) return env->NewStringUTF("");
+    const char *name = tsf_get_presetname(f, index);
+    const struct tsf_preset *p = &f->presets[index];
     char buf[320];
     snprintf(buf, sizeof(buf), "%s|%d|%d", name ? name : "Preset", (int)p->bank, (int)p->preset);
     return env->NewStringUTF(buf);

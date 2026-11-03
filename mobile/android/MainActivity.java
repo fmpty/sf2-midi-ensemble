@@ -1,8 +1,10 @@
 package com.sf2.ensemble;
 
+import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.WindowManager;
+import android.webkit.WebView;
 
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
@@ -18,7 +20,24 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(MidiBridgePlugin.class);
         registerPlugin(SynthBridgePlugin.class);
         super.onCreate(savedInstanceState);
+        getWindow().getDecorView().setBackgroundColor(Color.parseColor("#0e1116"));
         applyImmersive();
+        tintWebViewBackground();
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        tintWebViewBackground();
+    }
+
+    /** WebView 默认白底，在 HTML/CSS 就绪前会闪白屏 */
+    private void tintWebViewBackground() {
+        if (getBridge() == null) return;
+        WebView webView = getBridge().getWebView();
+        if (webView != null) {
+            webView.setBackgroundColor(Color.parseColor("#0e1116"));
+        }
     }
 
     @Override

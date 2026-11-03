@@ -1,40 +1,68 @@
 /**
  * 应用主逻辑：界面渲染、设备-乐器映射、配置持久化。
  */
-import { SynthEngine, DEFAULT_CHANNELS } from './synth.js';
 import { NativeSynthEngine, isNativeSynthAvailable } from './native-synth.js';
 import { MidiHub } from './midi.js';
 import { NativeMidiHub, isNativeMidiAvailable } from './native-midi.js';
 import { VirtualKeyboard } from './keyboard.js';
-import { GM_PROGRAMS, DRUM_NOTES, noteName, programLabel } from './gm.js';
+import { GM_PROGRAMS, noteName, noteNameOnKey, programLabel } from './gm.js';
 import { getBuiltinSoundfont, openSoundfont, loadSoundfontPaths, storeGet, storeSet, getInfo, isMobile, isElectron, keepAwake } from './platform.js';
-import { initLayout, tierFromWidth, syncJianpuPianoMetrics } from './layout.js';
+import { initLayout, tierFromWidth, scheduleSyncJianpuPianoMetrics } from './layout.js';
+import {
+    dedupeDevices,
+    deviceMac,
+    normalizeMac,
+    macFromDeviceId,
+    applyRouteProfile,
+    snapshotRouteProfile,
+    isMidiNamedDevice,
+    isBluetoothMidiEntry,
+    isMidiDeviceOnline,
+} from './device-id.js';
 
 const VIRTUAL_KEY = 'virtual:keyboard';
 
 const state = {
     routes: {},
     order: [],
+    /** 按蓝牙 MAC 保存的手柄映射（断开后仍保留） */
+    deviceProfiles: {},
     master: { volume: 0.9, voiceCap: 160, lowLatency: true },
     keyboardEnabled: true,
     selected: null,
     midiReady: false,
 };
 
-// 原生安装包走原生合成（AAudio + TinySoundFont），其余走 WebAudio + spessasynth
-let engine = isNativeSynthAvailable() ? new NativeSynthEngine() : new SynthEngine();
-let MAX_CHANNELS = engine.maxChannels || 32;
+/** WebAudio + spessasynth 仅在桌面/回退时按需加载（Android 原生包首屏不下载 ~1.3MB） */
+let webSynthModule = null;
+async function createWebSynthEngine() {
+    if (!webSynthModule) webSynthModule = await import('./synth.js');
+    return new webSynthModule.SynthEngine();
+}
+
+let engine;
+let hub;
+let vkb;
+let MAX_CHANNELS = 32;
 
 /** 引擎切换（原生合成不可用时回退） */
 function swapEngine(next) {
     engine = next;
     MAX_CHANNELS = next.maxChannels || 32;
-    hub.engine = next;
-    vkb.engine = next;
+    if (hub) hub.engine = next;
+    if (vkb) vkb.engine = next;
 }
-// 原生安装包走原生 MIDI 插件，桌面/浏览器走 Web MIDI
-const hub = isNativeMidiAvailable() ? new NativeMidiHub(engine) : new MidiHub(engine);
-const vkb = new VirtualKeyboard(engine);
+
+async function initRuntime() {
+    if (isNativeSynthAvailable()) {
+        engine = new NativeSynthEngine();
+    } else {
+        engine = await createWebSynthEngine();
+    }
+    MAX_CHANNELS = engine.maxChannels || 32;
+    hub = isNativeMidiAvailable() ? new NativeMidiHub(engine) : new MidiHub(engine);
+    vkb = new VirtualKeyboard(engine);
+}
 
 const el = (id) => document.getElementById(id);
 const dom = {};
@@ -54,7 +82,8 @@ function defaultRoute(key, name, kind, channel) {
         key,
         name,
         kind,
-        deviceId: kind === 'midi' ? key.slice(5) : '',
+        deviceId: kind === 'midi' ? '' : '',
+        deviceMac: '',
         label: '',
         enabled: true,
         channel,
@@ -123,41 +152,145 @@ function applyAllRoutes() {
 
 /* ------------------------------ 设备同步 ------------------------------ */
 
-function syncDevices(list) {
-    let changed = false;
-    const seen = new Set();
-    for (const dev of list) {
-        const key = `midi:${dev.id}`;
-        seen.add(key);
-        if (!state.routes[key]) {
-            state.routes[key] = defaultRoute(key, dev.name, 'midi', pickChannel(null));
-            state.routes[key].guessBluetooth = dev.guessBluetooth;
-            state.order.push(key);
-            changed = true;
-            log(`检测到 MIDI 设备：${dev.name}${dev.guessBluetooth ? '（疑似蓝牙）' : ''}`, 'ok');
-        } else {
-            state.routes[key].guessBluetooth = dev.guessBluetooth;
+function persistDeviceProfilesFromRoutes() {
+    for (const r of Object.values(state.routes)) {
+        if (r.kind === 'midi' && r.deviceMac) {
+            state.deviceProfiles[r.deviceMac] = snapshotRouteProfile(r);
         }
     }
-    // 已断开的设备保留配置，但标记为离线
+}
+
+function findMidiRouteByMac(mac) {
+    if (!mac) return null;
+    const norm = normalizeMac(mac);
     for (const r of Object.values(state.routes)) {
-        r.online = r.kind !== 'midi' || seen.has(r.key);
+        if (r.kind === 'midi' && normalizeMac(r.deviceMac) === norm) return r;
     }
-    if (!state.routes[VIRTUAL_KEY]) {
-        state.routes[VIRTUAL_KEY] = defaultRoute(VIRTUAL_KEY, '电脑键盘（虚拟手柄）', 'virtual', pickChannel(null));
-        state.order.push(VIRTUAL_KEY);
-        changed = true;
+    return null;
+}
+
+function routeKeyForDev(dev) {
+    const mac = deviceMac(dev);
+    return mac ? `midi:mac:${mac}` : `midi:${dev.id}`;
+}
+
+function isSameMidiRoute(r, key, id, mac) {
+    if (!r || r.kind !== 'midi') return false;
+    if (r.key === key || r.key === `midi:${id}` || r.deviceId === id) return true;
+    if (!mac) return false;
+    const rm = normalizeMac(r.deviceMac) || macFromDeviceId(r.deviceId) || macFromDeviceId(r.key);
+    return rm === mac;
+}
+
+let syncDevicesTimer = 0;
+
+/**
+ * @param {unknown[]} list
+ * @param {{ markOfflineWhenEmpty?: boolean, immediate?: boolean }} [opts]
+ */
+function syncDevices(list, opts = {}) {
+    const run = () => {
+        let changed = false;
+        const raw = Array.isArray(list) ? list : [];
+        const devices = dedupeDevices(raw);
+        /** 仅「当前在线」设备参与在线判定，断开/空列表也要标离线 */
+        const seenOnline = new Set();
+
+        for (const dev of devices) {
+            if (isBluetoothMidiEntry(dev) && !isMidiNamedDevice(dev)) continue;
+            const id = String(dev.id);
+            const mac = deviceMac(dev);
+            const key = routeKeyForDev(dev);
+            const online = isMidiDeviceOnline(dev);
+            if (online) {
+                seenOnline.add(key);
+                seenOnline.add(`midi:${id}`);
+            }
+
+            for (const k of [...state.order]) {
+                if (k === key) continue;
+                const r = state.routes[k];
+                if (!isSameMidiRoute(r, key, id, mac)) continue;
+                if (mac) {
+                    state.deviceProfiles[mac] = {
+                        ...state.deviceProfiles[mac],
+                        ...snapshotRouteProfile(r),
+                    };
+                }
+                delete state.routes[k];
+                state.order = state.order.filter((x) => x !== k);
+                changed = true;
+            }
+
+            if (!state.routes[key]) {
+                const route = defaultRoute(key, dev.name, 'midi', pickChannel(null));
+                if (mac && state.deviceProfiles[mac]) applyRouteProfile(route, state.deviceProfiles[mac]);
+                state.routes[key] = route;
+                if (!state.order.includes(key)) state.order.push(key);
+                changed = true;
+                log(`检测到 MIDI 设备：${dev.name}${dev.guessBluetooth ? '（蓝牙）' : ''}${mac ? ` · ${mac}` : ''}`, 'ok');
+            }
+
+            const route = state.routes[key];
+            route.key = key;
+            route.name = dev.name;
+            route.deviceId = id;
+            route.deviceMac = mac || route.deviceMac || '';
+            route.guessBluetooth = dev.guessBluetooth;
+            route.online = online;
+        }
+
+        for (const r of Object.values(state.routes)) {
+            if (r.kind !== 'midi') continue;
+            const mac = normalizeMac(r.deviceMac) || macFromDeviceId(r.deviceId);
+            let on = seenOnline.has(r.key) || (r.deviceId && seenOnline.has(`midi:${r.deviceId}`));
+            if (!on && mac) {
+                on = devices.some((d) => isMidiDeviceOnline(d) && deviceMac(d) === mac);
+            }
+            if (r.online !== on) changed = true;
+            r.online = on;
+            if (!on && r.deviceMac) state.deviceProfiles[r.deviceMac] = snapshotRouteProfile(r);
+        }
+
+        if (!state.routes[VIRTUAL_KEY]) {
+            state.routes[VIRTUAL_KEY] = defaultRoute(VIRTUAL_KEY, '电脑键盘（虚拟手柄）', 'virtual', pickChannel(null));
+            state.order.push(VIRTUAL_KEY);
+            changed = true;
+        }
+        state.routes[VIRTUAL_KEY].online = true;
+
+        if (changed) {
+            persistDeviceProfilesFromRoutes();
+            saveConfig();
+            pushRoutesToNative();
+        }
+        renderDevices();
+        renderPiano();
+    };
+
+    if (opts.immediate) {
+        run();
+        return;
     }
-    state.routes[VIRTUAL_KEY].online = true;
-    if (changed) saveConfig();
-    renderDevices();
-    renderPiano();
+    clearTimeout(syncDevicesTimer);
+    syncDevicesTimer = setTimeout(run, 100);
+}
+
+function resolveRouteForDeviceId(deviceId) {
+    const id = String(deviceId);
+    for (const r of Object.values(state.routes)) {
+        if (r.kind === 'midi' && r.deviceId === id) return r;
+    }
+    const mac = macFromDeviceId(id);
+    if (mac) return findMidiRouteByMac(mac);
+    return state.routes[`midi:${id}`] || state.routes[`midi:mac:${mac}`] || null;
 }
 
 /* ------------------------------ 界面渲染 ------------------------------ */
 
 function renderDevices() {
     const wrap = dom.devices;
+    if (!wrap) return;
     wrap.innerHTML = '';
     const keys = state.order.filter((k) => state.routes[k]);
     for (const key of keys) {
@@ -171,7 +304,7 @@ function renderDevices() {
                     <span class="dot ${r.online === false ? 'dot-off' : 'dot-on'}"></span>
                     <input class="label-input" value="${escapeHtml(r.label || r.name)}" title="自定义名称" />
                     ${r.kind === 'virtual' ? '<span class="tag">虚拟</span>' : ''}
-                    ${r.guessBluetooth ? '<span class="tag tag-ble">蓝牙</span>' : ''}
+                    ${r.guessBluetooth || r.deviceMac ? '<span class="tag tag-ble">蓝牙</span>' : ''}
                     ${r.online === false ? '<span class="tag tag-off">已断开</span>' : ''}
                 </div>
                 <div class="card-actions">
@@ -209,7 +342,7 @@ function renderDevices() {
         wrap.appendChild(card);
     }
     if (!keys.length) {
-        wrap.innerHTML = '<div class="empty">尚未检测到 MIDI 设备。请打开蓝牙 MIDI 手柄并点击「扫描设备」。</div>';
+        wrap.innerHTML = '<div class="empty">尚未检测到 MIDI 手柄。请先在系统蓝牙中配对手柄，再点击下方「刷新手柄列表」。</div>';
     }
     const online = keys.filter((k) => state.routes[k].online !== false).length;
     if (dom.devCount) {
@@ -230,7 +363,7 @@ function panLabel(p) {
 function channelOptions(current) {
     let opts = '';
     for (let c = 0; c < MAX_CHANNELS; c++) {
-        const mark = c === 9 ? '（打击乐通道）' : c >= DEFAULT_CHANNELS ? '（扩展）' : '';
+        const mark = c === 9 ? '（打击乐通道）' : c >= 16 ? '（扩展）' : '';
         opts += `<option value="${c}" ${c === current ? 'selected' : ''}>${c + 1}${mark}</option>`;
     }
     return opts;
@@ -271,11 +404,52 @@ function rowInstrument(r) {
 
 function presetOption(route, isDrum) {
     return (p) => {
-        const value = `${p.bankMSB}|${p.bankLSB}|${p.program}`;
-        const sel = !isDrum && !route.isDrum && route.bankMSB === p.bankMSB && route.bankLSB === p.bankLSB && route.program === p.program;
-        const selD = isDrum && route.isDrum && route.drumProgram === p.program && route.bankMSB === p.bankMSB;
-        return `<option value="${value}" ${sel || selD ? 'selected' : ''}>${escapeHtml(p.name || '')}</option>`;
+        const prefix = p.bankId ? `${p.bankId}|` : '';
+        const value = `${prefix}${p.bankMSB}|${p.bankLSB}|${p.program}`;
+        const bankMatch = !p.bankId || route.soundBankId === p.bankId;
+        const sel = bankMatch && !isDrum && !route.isDrum && route.bankMSB === p.bankMSB && route.bankLSB === p.bankLSB && route.program === p.program;
+        const selD = bankMatch && isDrum && route.isDrum && route.drumProgram === p.program && route.bankMSB === p.bankMSB;
+        const label = p.bankId && engine.banks.length > 1
+            ? `[${engine.banks.find((b) => b.id === p.bankId)?.name || p.bankId}] ${p.name || ''}`
+            : (p.name || '');
+        return `<option value="${value}" ${sel || selD ? 'selected' : ''}>${escapeHtml(label)}</option>`;
     };
+}
+
+function applyInstrumentValue(route, raw) {
+    const parts = raw.split('|');
+    if (parts.length >= 4 && /^native\d+$/.test(parts[0])) {
+        route.soundBankId = parts[0];
+        route.bankMSB = Number(parts[1]);
+        route.bankLSB = Number(parts[2]);
+        route.program = Number(parts[3]);
+        route.isDrum = false;
+        return;
+    }
+    route.soundBankId = undefined;
+    const [msb, lsb, prog] = parts.map(Number);
+    route.bankMSB = msb;
+    route.bankLSB = lsb;
+    route.program = prog;
+    route.isDrum = false;
+}
+
+function applyDrumValue(route, raw) {
+    const parts = raw.split('|');
+    if (parts.length >= 4 && /^native\d+$/.test(parts[0])) {
+        route.soundBankId = parts[0];
+        route.bankMSB = Number(parts[1]);
+        route.bankLSB = Number(parts[2]);
+        route.drumProgram = Number(parts[3]);
+        route.isDrum = true;
+        return;
+    }
+    route.soundBankId = undefined;
+    const [msb, lsb, prog] = parts.map(Number);
+    route.bankMSB = msb;
+    route.bankLSB = lsb;
+    route.drumProgram = prog;
+    route.isDrum = true;
 }
 
 function wireCard(card, route) {
@@ -283,13 +457,9 @@ function wireCard(card, route) {
         const field = input.dataset.field;
         input.addEventListener('input', () => {
             if (input.type === 'checkbox') route[field] = input.checked;
-            else if (field === 'instrument') {
-                const [msb, lsb, prog] = input.value.split('|').map(Number);
-                route.bankMSB = msb; route.bankLSB = lsb; route.program = prog; route.isDrum = false;
-            } else if (field === 'drumProgram') {
-                const [msb, lsb, prog] = input.value.split('|').map(Number);
-                route.bankMSB = msb; route.bankLSB = lsb; route.drumProgram = prog; route.isDrum = true;
-            } else if (field === 'channel') route.channel = Number(input.value);
+            else if (field === 'instrument') applyInstrumentValue(route, input.value);
+            else if (field === 'drumProgram') applyDrumValue(route, input.value);
+            else if (field === 'channel') route.channel = Number(input.value);
             else if (typeof route[field] === 'number' || ['volume', 'pan', 'reverb', 'chorus', 'transpose', 'velocityGain'].includes(field)) {
                 route[field] = Number(input.value);
             } else route[field] = input.value;
@@ -304,6 +474,7 @@ function wireCard(card, route) {
     });
     card.querySelector('.label-input').addEventListener('input', (e) => {
         route.label = e.target.value;
+        if (route.deviceMac) state.deviceProfiles[route.deviceMac] = snapshotRouteProfile(route);
         saveConfig();
     });
     card.querySelector('[data-act="test"]').addEventListener('click', () => testRoute(route));
@@ -372,9 +543,18 @@ function pianoLayoutMode() {
 
 /** 竖屏三排：每排一个八度 C–B（上 C5 / 中 C4 / 下 C3） */
 const PORTRAIT_OCTAVES = [72, 60, 48];
+const PIANO_OCT_MIN = -2;
+const PIANO_OCT_MAX = 3;
+/** 屏幕键盘整体移调（八度）；竖屏三排与横屏条同步 */
+let pianoOctaveShift = 0;
+
+function portraitOctaveStarts() {
+    const shift = pianoOctaveShift * 12;
+    return PORTRAIT_OCTAVES.map((n) => Math.max(0, Math.min(116, n + shift)));
+}
 
 function pianoLayoutKey() {
-    if (pianoLayoutMode() === 'jianpu') return 'jianpu';
+    if (pianoLayoutMode() === 'jianpu') return `jianpu-${pianoOctaveShift}`;
     const [start, end] = pianoKeyboardRange();
     return `kb-${start}-${end}`;
 }
@@ -382,7 +562,32 @@ function pianoLayoutKey() {
 /** 横屏钢琴条音域 */
 function pianoKeyboardRange() {
     const narrow = typeof window !== 'undefined' && window.innerWidth < 760;
-    return narrow ? [48, 72] : [PIANO_START, PIANO_END];
+    const [baseStart, baseEnd] = narrow ? [48, 72] : [PIANO_START, PIANO_END];
+    const shift = pianoOctaveShift * 12;
+    return [
+        Math.max(0, Math.min(127, baseStart + shift)),
+        Math.max(0, Math.min(127, baseEnd + shift)),
+    ];
+}
+
+function updatePianoInfoHint() {
+    if (!dom.pianoInfo) return;
+    const octLabel = pianoOctaveShift > 0 ? `+${pianoOctaveShift}` : String(pianoOctaveShift);
+    if (pianoLayoutMode() === 'jianpu') {
+        const rows = portraitOctaveStarts();
+        dom.pianoInfo.textContent = `八度 ${octLabel} · ${noteName(rows[2])}–${noteName(rows[0] + 11)}`;
+    } else {
+        const [start, end] = pianoKeyboardRange();
+        dom.pianoInfo.textContent = `${noteName(start)}–${noteName(end)} · 八度 ${octLabel}`;
+    }
+}
+
+function shiftPianoOctave(delta) {
+    const next = Math.max(PIANO_OCT_MIN, Math.min(PIANO_OCT_MAX, pianoOctaveShift + delta));
+    if (next === pianoOctaveShift) return;
+    pianoOctaveShift = next;
+    pianoLayoutCache = '';
+    renderPiano();
 }
 
 /** @deprecated 保留旧名供外部调试 */
@@ -546,13 +751,13 @@ function appendPianoKeys(container, start, end) {
         const key = document.createElement('div');
         key.className = `pkey ${isBlack ? 'black' : 'white'}`;
         key.dataset.note = n;
-        key.title = `${noteName(n)}${DRUM_NOTES[n] ? ' · ' + DRUM_NOTES[n] : ''}`;
+        key.title = noteName(n);
         if (isBlack) {
             key.style.left = `calc(${whiteIndex * w}% - var(--bw) / 2)`;
         } else {
             whiteIndex++;
         }
-        key.innerHTML = `<span>${DRUM_NOTES[n] ? '' : noteName(n)}</span>`;
+        key.innerHTML = `<span class="pk-label">${noteNameOnKey(n)}</span>`;
         container.appendChild(key);
     }
 }
@@ -566,7 +771,7 @@ function renderPianoKeyboard(piano, start, end) {
 function renderPianoJianpu(piano) {
     piano.classList.add('jianpu');
     piano.innerHTML = '';
-    for (const start of PORTRAIT_OCTAVES) {
+    for (const start of portraitOctaveStarts()) {
         const strip = document.createElement('div');
         strip.className = 'piano-bar';
         appendPianoKeys(strip, start, start + 11);
@@ -576,7 +781,6 @@ function renderPianoJianpu(piano) {
 
 function renderPiano() {
     const piano = dom.piano;
-    const route = currentPianoRoute();
     const layoutKey = pianoLayoutKey();
     if (layoutKey !== pianoLayoutCache) {
         releaseAllPiano();
@@ -589,38 +793,10 @@ function renderPiano() {
         }
         bindPiano();
     }
-    renderTargetChips();
-    dom.pianoInfo.textContent = route ? `当前目标：${route.label || route.name}` : '请先在「手柄」页选择一个设备';
     if (pianoLayoutMode() === 'jianpu') {
-        requestAnimationFrame(() => syncJianpuPianoMetrics());
+        scheduleSyncJianpuPianoMetrics();
     }
-}
-
-/* ------------------------------ 演奏目标快捷切换 ------------------------------ */
-
-let chipBound = false;
-
-function renderTargetChips() {
-    const wrap = dom.targetChips;
-    if (!wrap) return;
-    const cur = currentPianoRoute();
-    const keys = state.order.filter((k) => state.routes[k]);
-    wrap.innerHTML = keys.map((k) => {
-        const r = state.routes[k];
-        const on = cur && cur.key === k;
-        const cls = `chip${on ? ' on' : ''}${r.online === false ? ' off' : ''}`;
-        return `<button class="${cls}" data-key="${k}">${escapeHtml(r.label || r.name)}</button>`;
-    }).join('') || '<span class="hint">暂无设备</span>';
-    if (!chipBound) {
-        chipBound = true;
-        wrap.addEventListener('click', (e) => {
-            const btn = e.target.closest ? e.target.closest('.chip') : null;
-            if (!btn) return;
-            state.selected = btn.dataset.key;
-            renderDevices();
-            renderPiano();
-        });
-    }
+    updatePianoInfoHint();
 }
 
 /* ------------------------------ 音源管理 ------------------------------ */
@@ -659,7 +835,8 @@ async function moveBank(i, dir) {
 }
 
 async function addBankFile(name, arrayBuffer, builtin = false, filePath = '') {
-    const id = await engine.addBank(arrayBuffer, name);
+    const payload = engine.native && filePath ? filePath : arrayBuffer;
+    const id = await engine.addBank(payload, name);
     const bank = engine.banks.find((b) => b.id === id);
     if (bank) bank.builtin = builtin;
     renderBanks();
@@ -682,9 +859,11 @@ let saveTimer = null;
 function saveConfig() {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(async () => {
+        persistDeviceProfilesFromRoutes();
         await apiSet('config', {
             routes: state.routes,
             order: state.order,
+            deviceProfiles: state.deviceProfiles,
             master: state.master,
             keyboardEnabled: state.keyboardEnabled,
             selected: state.selected,
@@ -700,11 +879,27 @@ async function apiSet(key, value) {
     try { await storeSet(key, value); } catch { /* 忽略 */ }
 }
 
+function importLegacyRouteProfiles(routes) {
+    if (!routes) return;
+    for (const r of Object.values(routes)) {
+        if (!r || r.kind !== 'midi') continue;
+        const mac = normalizeMac(r.deviceMac) || macFromDeviceId(r.deviceId) || macFromDeviceId(r.key);
+        if (mac) {
+            state.deviceProfiles[mac] = {
+                ...state.deviceProfiles[mac],
+                ...snapshotRouteProfile(r),
+            };
+        }
+    }
+}
+
 async function loadConfig() {
     const cfg = await apiGet('config');
     if (!cfg) return;
     if (cfg.routes) state.routes = cfg.routes;
     if (cfg.order) state.order = cfg.order;
+    if (cfg.deviceProfiles) state.deviceProfiles = cfg.deviceProfiles;
+    importLegacyRouteProfiles(cfg.routes);
     if (cfg.master) state.master = cfg.master;
     if (state.master.lowLatency == null) state.master.lowLatency = true;
     if (cfg.keyboardEnabled != null) state.keyboardEnabled = cfg.keyboardEnabled;
@@ -725,8 +920,8 @@ async function ensureEngine(retry = false) {
         log(engine.native
             ? `原生合成已启动（AAudio ${engine.sampleRate} Hz，缓冲 ${engine.latencyMs} ms）`
             : `音频引擎已启动（${engine.sampleRate} Hz，缓冲 ${Math.round((info.base || 0) * 1000)} ms / 输出 ${Math.round((info.output || 0) * 1000)} ms${engine.lowLatency ? '，低延迟模式' : ''}）`, 'ok');
-        if (engine.native && engine.latencyMs >= 60) {
-            log(`缓冲偏大（${engine.latencyMs} ms）：多为蓝牙输出或系统未给独占低延迟通路，可改用有线耳机`, 'warn');
+        if (engine.native && engine.outputBufferMs >= 60) {
+            log(`输出缓冲偏大（${engine.outputBufferMs} ms，周期约 ${engine.latencyMs} ms）：多为蓝牙或系统大周期 HAL，可试有线耳机`, 'warn');
         }
         if (!engine.native) {
             const builtin = await getBuiltinSoundfont();
@@ -746,7 +941,7 @@ async function ensureEngine(retry = false) {
         // 原生合成不可用（老设备 / 缺 AAudio / 音源缺失）时回退到 WebAudio，保证能发声
         if (!retry && engine.native) {
             log(`原生合成不可用（${e.message}），回退 WebAudio + spessasynth`, 'warn');
-            swapEngine(new SynthEngine());
+            swapEngine(await createWebSynthEngine());
             return ensureEngine(true);
         }
         log(`启动失败：${e.message}`, 'error');
@@ -780,21 +975,29 @@ async function connectMidi() {
     try {
         await hub.connect();
         state.midiReady = true;
-        dom.midiStatus.textContent = `MIDI 就绪${hub.sysex ? '（含 SysEx）' : ''}`;
-        dom.midiStatus.className = 'ok';
+        if (dom.midiStatus) {
+            dom.midiStatus.textContent = `MIDI 就绪${hub.sysex ? '（含 SysEx）' : ''}`;
+            dom.midiStatus.className = 'ok';
+        }
     } catch (e) {
-        dom.midiStatus.textContent = `MIDI 不可用：${e.message}`;
-        dom.midiStatus.className = 'warn';
+        if (dom.midiStatus) {
+            dom.midiStatus.textContent = `MIDI 不可用：${e.message}`;
+            dom.midiStatus.className = 'warn';
+        }
         log(`MIDI 初始化失败：${e.message}`, 'warn');
     }
-    syncDevices(hub.devices);
+    syncDevices(hub.devices, { immediate: true });
 }
 
 function updateStatus() {
     dom.statRate.textContent = `${engine.sampleRate} Hz`;
-    dom.statLatency.textContent = `${engine.latencyMs} ms`;
+    const lat = engine.latencyMs;
+    const buf = engine.native ? engine.outputBufferMs : 0;
+    dom.statLatency.textContent = `${lat} ms`;
+    dom.statLatency.title = engine.native && buf > lat
+        ? `AAudio 单周期约 ${lat} ms；输出队列约 ${buf} ms（与 PC 的 WebAudio 统计口径不同）`
+        : (engine.native ? 'AAudio 单周期延迟（与 PC WebAudio 口径不同）' : '');
     dom.statVoices.textContent = String(engine.voiceCount);
-    dom.statState.textContent = engine.running ? '运行中' : '已暂停';
 }
 
 /* ------------------------------ 事件绑定 ------------------------------ */
@@ -820,15 +1023,35 @@ function bindTabs() {
     showTab(saved);
 }
 
+const RESCAN_LABEL = '刷新手柄列表';
+
+async function rescanMidiDevices() {
+    const btn = dom.btnRescan;
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '正在读取系统设备…';
+    }
+    try {
+        if (!state.midiReady) await connectMidi().catch(() => {});
+        await hub.rescan();
+        syncDevices(hub.devices, { immediate: true, markOfflineWhenEmpty: true });
+        log(hub.devices.length ? `已刷新，当前 ${hub.devices.length} 个 MIDI 设备` : '未发现 MIDI 设备', hub.devices.length ? 'ok' : 'warn');
+    } catch (e) {
+        log(`刷新失败：${e.message}`, 'error');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = RESCAN_LABEL;
+        }
+    }
+}
+
 function bindUI() {
     bindTabs();
     dom.btnStart.addEventListener('click', () => ensureEngine());
-    dom.btnRescan.addEventListener('click', async () => {
-        hub.rescan();
-        await connectMidi().catch(() => {});
-        syncDevices(hub.devices);
-        log('已重新扫描 MIDI 设备（含蓝牙）', 'info');
-    });
+    dom.btnRescan.addEventListener('click', () => rescanMidiDevices());
+    if (dom.btnOctDown) dom.btnOctDown.addEventListener('click', () => shiftPianoOctave(-1));
+    if (dom.btnOctUp) dom.btnOctUp.addEventListener('click', () => shiftPianoOctave(1));
     dom.btnPanic.addEventListener('click', () => {
         engine.stopAll();
         vkb.releaseAll();
@@ -836,10 +1059,6 @@ function bindUI() {
         log('已停止所有音符', 'info');
     });
     dom.btnLoadBank.addEventListener('click', async () => {
-        if (engine.native) {
-            log('原生合成模式已内置音源；如需更换，请把 SF2 放入安装包的 assets 后重新打包', 'warn');
-            return;
-        }
         const files = await openSoundfont();
         if (!files || !files.length) return;
         for (const f of files) {
@@ -897,24 +1116,36 @@ function bindUI() {
 
 /* ------------------------------ 初始化 ------------------------------ */
 
+export async function startApp() {
+    await initRuntime();
+    await main();
+}
+
 async function main() {
     const ids = ['btn-start', 'start-overlay', 'status-audio', 'audio-dot', 'master-volume', 'master-volume-val',
         'voice-cap', 'voice-cap-val', 'bank-list', 'bank-count', 'btn-load-bank', 'device-list', 'btn-rescan',
-        'midi-status', 'btn-panic', 'btn-reset', 'kbd-toggle', 'piano', 'piano-info', 'stat-rate', 'stat-latency',
-        'stat-voices', 'stat-state', 'log', 'app-version', 'low-latency', 'tabs', 'target-chips', 'dev-count'];
+        'btn-panic', 'btn-reset', 'kbd-toggle', 'piano', 'piano-info', 'btn-oct-down', 'btn-oct-up',
+        'stat-rate', 'stat-latency',
+        'stat-voices', 'log', 'app-version', 'low-latency', 'tabs', 'dev-count'];
     ids.forEach((id) => { dom[camel(id)] = el(id); });
     dom.devices = el('device-list');
 
     bindUI();
 
-    hub.resolveRoute = (deviceId) => state.routes[`midi:${deviceId}`] || null;
-    hub.onDevices = (list) => syncDevices(list);
-    hub.onActivity = (deviceId, info) => flashActivity(`midi:${deviceId}`, info.note, info.velocity);
+    hub.resolveRoute = (deviceId) => resolveRouteForDeviceId(deviceId);
+    hub.onDevices = (list) => syncDevices(list, { immediate: true });
+    hub.onActivity = (deviceId, info) => {
+        const route = resolveRouteForDeviceId(deviceId);
+        flashActivity(route ? route.key : `midi:${deviceId}`, info.note, info.velocity);
+    };
     hub.onError = (e) => log(`MIDI 错误：${e.message}`, 'error');
 
     vkb.resolveRoute = () => state.routes[VIRTUAL_KEY] || null;
     vkb.onActivity = (info) => {
-        if (info.octave != null) { dom.pianoInfo.textContent = `键盘八度：${info.octave}`; return; }
+        if (info.octave != null) {
+            if (dom.pianoInfo) dom.pianoInfo.textContent = `电脑键盘八度：${info.octave}（Z / X 切换）`;
+            return;
+        }
         flashActivity(VIRTUAL_KEY, info.note, info.velocity);
     };
     vkb.setEnabled(true);
@@ -973,6 +1204,12 @@ async function main() {
 
     // 尚未连上设备时也渲染已保存的路由
     syncDevices([]);
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState !== 'visible' || !state.midiReady || !isNativeMidiAvailable()) return;
+        hub.refresh()
+            .then(() => syncDevices(hub.devices, { immediate: true }))
+            .catch(() => {});
+    });
     setInterval(updateStatus, 500);
     // 便于调试 / 自动化测试
     window.__ensemble = { engine, hub, vkb, state, pianoActive, pianoPress, pianoRelease, renderPiano, showTab };
@@ -981,5 +1218,3 @@ async function main() {
 function camel(id) {
     return id.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
 }
-
-window.addEventListener('DOMContentLoaded', main);

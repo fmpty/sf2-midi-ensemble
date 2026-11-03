@@ -1,6 +1,8 @@
 @echo off
+chcp 65001 >nul 2>&1
 setlocal
 cd /d "%~dp0.."
+set "JAVA_TOOL_OPTIONS=-Dfile.encoding=UTF-8 -Duser.language=en -Duser.country=US"
 echo [SF2 MIDI Ensemble] Android - mobile:android
 call npm run mobile:android
 if errorlevel 1 (

@@ -57,17 +57,27 @@ function writeManifest() {
     fs.writeFileSync(path.join(SF_DIR, 'manifest.json'), JSON.stringify({ files }, null, 2) + '\n');
 }
 
+function copyDirSync(fromDir, toDir) {
+    fs.mkdirSync(toDir, { recursive: true });
+    for (const name of fs.readdirSync(fromDir, { withFileTypes: true })) {
+        const from = path.join(fromDir, name.name);
+        const to = path.join(toDir, name.name);
+        if (name.isDirectory()) copyDirSync(from, to);
+        else fs.copyFileSync(from, to);
+    }
+}
+
 /** 组装移动端/网页用的 www 目录（Capacitor 的 webDir） */
 function buildWebBundle() {
     const www = path.join(ROOT, 'www');
     const src = path.join(ROOT, 'src', 'renderer');
     fs.mkdirSync(path.join(www, 'dist'), { recursive: true });
     fs.mkdirSync(path.join(www, 'assets', 'soundfonts'), { recursive: true });
-    for (const f of ['index.html', 'styles.css', 'dist/app.js', 'dist/spessasynth_processor.min.js',
-        'manifest.webmanifest', 'sw.js']) {
+    for (const f of ['index.html', 'styles.css', 'manifest.webmanifest', 'sw.js']) {
         const from = path.join(src, f);
         if (fs.existsSync(from)) fs.copyFileSync(from, path.join(www, f));
     }
+    copyDirSync(path.join(src, 'dist'), path.join(www, 'dist'));
     // 音源文件较大，用硬链接减少磁盘占用，失败则复制
     for (const f of fs.readdirSync(SF_DIR)) {
         const from = path.join(SF_DIR, f);
@@ -93,12 +103,15 @@ async function build() {
     ensureSoundfont();
     await copyProcessor();
     const options = {
-        entryPoints: [path.join(ROOT, 'src', 'renderer', 'app.js')],
-        outfile: path.join(OUT_DIR, 'app.js'),
+        entryPoints: [path.join(ROOT, 'src', 'renderer', 'boot.js')],
+        outdir: OUT_DIR,
         bundle: true,
-        format: 'iife',
+        splitting: true,
+        format: 'esm',
         platform: 'browser',
         target: 'chrome120',
+        entryNames: '[name]',
+        chunkNames: 'chunks/[name]-[hash]',
         sourcemap: false,
         legalComments: 'none',
         logLevel: 'info',
@@ -108,8 +121,9 @@ async function build() {
         await ctx.watch();
         console.log('esbuild: 监听中…');
     } else {
-        await esbuild.build(options);
-        console.log('esbuild: 构建完成 ->', path.relative(ROOT, path.join(OUT_DIR, 'app.js')));
+        const result = await esbuild.build(options);
+        const outs = result.metafile ? Object.keys(result.metafile.outputs) : [];
+        console.log('esbuild: 构建完成 ->', outs.map((p) => path.relative(ROOT, p)).join(', ') || OUT_DIR);
         buildWebBundle();
     }
 }
