@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('api', {
     midiListDevices: () => ipcRenderer.invoke('app:midi-list'),
     midiOpenAll: () => ipcRenderer.invoke('app:midi-open-all'),
     midiCloseAll: () => ipcRenderer.invoke('app:midi-close-all'),
+    saveMidiFile: (filename, data) => ipcRenderer.invoke('app:save-midi', filename, data),
     onMidiBytes: (handler) => {
         const listener = (_event, payload) => handler(payload);
         ipcRenderer.on('app:midi-bytes', listener);

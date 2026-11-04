@@ -212,3 +212,26 @@ ipcMain.handle('app:midi-close-all', () => {
     midiBridge.closeAll();
     return true;
 });
+
+function uniqueDownloadPath(filename) {
+    const dir = app.getPath('downloads');
+    const safe = path.basename(String(filename || 'performance.mid')).replace(/[<>:"/\\|?*]/g, '_');
+    const name = safe.toLowerCase().endsWith('.mid') ? safe : `${safe}.mid`;
+    let filePath = path.join(dir, name);
+    if (!fs.existsSync(filePath)) return filePath;
+    const ext = path.extname(name);
+    const base = path.basename(name, ext);
+    for (let i = 2; i < 100; i++) {
+        filePath = path.join(dir, `${base}-${i}${ext}`);
+        if (!fs.existsSync(filePath)) return filePath;
+    }
+    return path.join(dir, `${base}-${Date.now()}${ext}`);
+}
+
+ipcMain.handle('app:save-midi', async (_e, filename, data) => {
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    if (!buf.length) throw new Error('没有可保存的演奏');
+    const filePath = uniqueDownloadPath(filename);
+    await fsp.writeFile(filePath, buf);
+    return filePath;
+});

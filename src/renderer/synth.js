@@ -203,6 +203,16 @@ export class SynthEngine {
         this.synth?.controllerChange(channel, cc, clamp127(value));
     }
 
+    programChange(channel, program, isDrum = false, bank = 0) {
+        if (!this.synth) return;
+        this.ensureChannels(channel + 1);
+        this.synth.controllerChange(channel, 0, (bank >> 7) & 127);
+        this.synth.controllerChange(channel, 32, bank & 127);
+        const ch = this.synth.midiChannels[channel];
+        if (ch && typeof ch.setDrums === 'function') ch.setDrums(!!isDrum);
+        this.synth.programChange(channel, program | 0);
+    }
+
     pitchWheel(channel, value) {
         this.synth?.pitchWheel(channel, value);
     }

@@ -10,13 +10,31 @@ import { VirtualKeyboard } from './keyboard.js';
 import {
     GM_PROGRAMS, drumKitChinese, noteName, noteNameOnKey, presetDisplayName, programLabel,
 } from './gm.js';
-import { getBuiltinSoundfont, openSoundfont, loadSoundfontPaths, storeGet, storeSet, getInfo, isMobile, isElectron, keepAwake, nativePianoBridge } from './platform.js';
+import { getBuiltinSoundfont, openSoundfont, loadSoundfontPaths, storeGet, storeSet, getInfo, isMobile, isElectron, keepAwake, nativePianoBridge, nativeSynthPlugin } from './platform.js';
 import { initLayout, tierFromWidth, scheduleSyncJianpuPianoMetrics } from './layout.js';
 import { installNoteLeakGuard } from './note-leak-guard.js';
 import { logMidiDeviceScanDiagnostics } from './device-scan-log.js';
 import { midiLayerLog, MIDI_LAYER_LOG_REV } from './midi-layer-log.js';
 import { midiTrace, setMidiDebugSink } from './midi-debug.js';
 import { MIDI_WEB_BUILD_ID } from './midi-build-id.js';
+import {
+    installPerformanceCapture,
+    startRecording,
+    stopRecording,
+    isCapturing,
+    hasPerformance,
+    playPerformance,
+    stopPlayback,
+    isPlaying,
+    loadPerformance,
+    parseMidi,
+    downloadMidiFile,
+    midiFileBase64,
+    toMidiBytes,
+    recordingElapsedMs,
+    playbackElapsedMs,
+    performanceDurationMs,
+} from './performance-midi.js';
 import {
     dedupeDevices,
     deviceMac,
@@ -61,6 +79,7 @@ function swapEngine(next) {
     MAX_CHANNELS = next.maxChannels || 32;
     if (hub) hub.engine = next;
     if (vkb) vkb.engine = next;
+    installPerformanceCapture(next);
 }
 
 async function initRuntime() {
@@ -1439,6 +1458,155 @@ function rescanMidiDevices() {
     })();
 }
 
+function releasePlayedNote(ch, note) {
+    try { engine.noteOff(ch, note); } catch { /* 忽略 */ }
+}
+
+function performRecordedEvent(e) {
+    if (!engine || !engine.started) return;
+    const ch = e.ch | 0;
+    if (e.type === 0x90 && e.b > 0) {
+        engine.noteOff(ch, e.a);
+        engine.noteOn(ch, e.a, e.b);
+    } else if (e.type === 0x80 || e.type === 0x90) {
+        engine.noteOff(ch, e.a);
+    } else if (e.type === 0xb0 && typeof engine.controllerChange === 'function') {
+        engine.controllerChange(ch, e.a, e.b);
+    } else if (e.type === 0xe0 && typeof engine.pitchWheel === 'function') {
+        engine.pitchWheel(ch, ((e.b & 127) << 7) | (e.a & 127));
+    } else if (e.type === 0xc0 && typeof engine.programChange === 'function') {
+        const bank = ((e.bank?.msb & 127) << 7) | (e.bank?.lsb & 127);
+        engine.programChange(ch, e.a, !!e.drum, bank);
+    }
+}
+
+function clockText(ms) {
+    const s = Math.max(0, Math.round((ms || 0) / 1000));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+let recUiTimer = 0;
+function updateRecUi() {
+    const btnRec = document.getElementById('btn-rec');
+    const btnPlay = document.getElementById('btn-rec-play');
+    const btnExport = document.getElementById('btn-rec-export');
+    const status = document.getElementById('rec-status');
+    if (!btnRec || !btnPlay || !btnExport || !status) return;
+    const recording = isCapturing();
+    const playing = isPlaying();
+    btnRec.textContent = recording ? '停止' : '录制';
+    btnPlay.disabled = recording || !hasPerformance();
+    btnPlay.textContent = playing ? '停止' : '播放';
+    btnExport.disabled = recording || playing || !hasPerformance();
+    if (recording) status.textContent = `录制中 ${clockText(recordingElapsedMs())}`;
+    else if (playing) status.textContent = `播放中 ${clockText(playbackElapsedMs())} / ${clockText(performanceDurationMs())}`;
+    else if (hasPerformance()) status.textContent = `已记录 ${clockText(performanceDurationMs())}，可播放或导出 MIDI`;
+    else status.textContent = '未录制';
+    if ((recording || playing) && !recUiTimer) recUiTimer = setInterval(updateRecUi, 250);
+    else if (!recording && !playing && recUiTimer) {
+        clearInterval(recUiTimer);
+        recUiTimer = 0;
+    }
+}
+
+async function savePerformanceFile(filename) {
+    try {
+        if (isElectron() && window.api && typeof window.api.saveMidiFile === 'function') {
+            const filePath = await window.api.saveMidiFile(filename, toMidiBytes());
+            log(`已保存到 ${filePath}`, 'ok');
+            return;
+        }
+        const synth = nativeSynthPlugin();
+        if (synth && typeof synth.saveMidi === 'function') {
+            const res = await synth.saveMidi({ filename, data: midiFileBase64() });
+            if (res && res.path) {
+                log(`已保存到 ${res.path}`, 'ok');
+                return;
+            }
+        }
+        downloadMidiFile(filename);
+        log(`已交给系统下载。请到「下载」文件夹找 ${filename}`, 'ok');
+    } catch (err) {
+        log(`导出失败：${err && err.message ? err.message : err}`, 'error');
+    }
+}
+
+function bindPerformance() {
+    const btnRec = document.getElementById('btn-rec');
+    const btnPlay = document.getElementById('btn-rec-play');
+    const btnExport = document.getElementById('btn-rec-export');
+    const btnImport = document.getElementById('btn-rec-import');
+    if (!btnRec || !btnPlay || !btnExport || !btnImport) return;
+    btnRec.addEventListener('click', () => {
+        if (isPlaying()) {
+            stopPlayback(releasePlayedNote);
+            applyAllRoutes();
+        }
+        if (isCapturing()) {
+            stopRecording();
+            log('演奏记录已停止', 'ok');
+        } else {
+            if (!engine.started) {
+                log('请先启动音频引擎，再录制', 'warn');
+                updateRecUi();
+                return;
+            }
+            startRecording(state.order.map((k) => state.routes[k]).filter(Boolean));
+            log('开始录制演奏（MIDI，不录音频）', 'info');
+        }
+        updateRecUi();
+    });
+    btnPlay.addEventListener('click', () => {
+        if (isCapturing()) return;
+        if (isPlaying()) {
+            stopPlayback(releasePlayedNote);
+            applyAllRoutes();
+            updateRecUi();
+            return;
+        }
+        if (!engine.started) {
+            log('请先启动音频引擎，再播放', 'warn');
+            return;
+        }
+        if (!hasPerformance()) return;
+        log('播放演奏记录', 'info');
+        playPerformance(performRecordedEvent, () => {
+            applyAllRoutes();
+            log('播放结束', 'info');
+            updateRecUi();
+        });
+        updateRecUi();
+    });
+    btnExport.addEventListener('click', () => {
+        if (!hasPerformance() || isCapturing() || isPlaying()) return;
+        const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+        savePerformanceFile(`演奏-${stamp}.mid`);
+    });
+    btnImport.addEventListener('click', () => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.mid,.midi,audio/midi';
+        input.addEventListener('change', async () => {
+            const file = input.files && input.files[0];
+            if (!file) return;
+            try {
+                if (isCapturing()) stopRecording();
+                if (isPlaying()) {
+                    stopPlayback(releasePlayedNote);
+                    applyAllRoutes();
+                }
+                loadPerformance(parseMidi(await file.arrayBuffer()));
+                log(`已导入 ${file.name}`, 'ok');
+            } catch (err) {
+                log(`导入失败：${err.message}`, 'error');
+            }
+            updateRecUi();
+        });
+        input.click();
+    });
+    updateRecUi();
+}
+
 function bindUI() {
     bindTabs();
     dom.btnStart.addEventListener('click', () => ensureEngine());
@@ -1447,9 +1615,13 @@ function bindUI() {
     if (dom.btnOctDown) dom.btnOctDown.addEventListener('click', () => shiftPianoOctave(-1));
     if (dom.btnOctUp) dom.btnOctUp.addEventListener('click', () => shiftPianoOctave(1));
     dom.btnPanic.addEventListener('click', () => {
+        const wasPlaying = isPlaying();
+        if (wasPlaying) stopPlayback();
         engine.stopAll();
         vkb.releaseAll();
         releaseAllPiano();
+        if (wasPlaying) applyAllRoutes();
+        updateRecUi();
         log('已停止所有音符', 'info');
     });
     dom.btnLoadBank.addEventListener('click', async () => {
@@ -1486,10 +1658,13 @@ function bindUI() {
         saveConfig();
     });
     dom.btnReset.addEventListener('click', () => {
+        if (isPlaying()) stopPlayback();
         engine.reset();
         applyAllRoutes();
+        updateRecUi();
         log('合成器已复位', 'info');
     });
+    bindPerformance();
 
     // 拖拽载入音源
     window.addEventListener('dragover', (e) => { e.preventDefault(); document.body.classList.add('dropping'); });
@@ -1517,6 +1692,7 @@ export async function startApp() {
 
 async function main() {
     installNoteLeakGuard(engine, (msg) => log(msg, 'info'));
+    installPerformanceCapture(engine);
     const ids = ['btn-start', 'start-overlay', 'status-audio', 'audio-dot', 'master-volume', 'master-volume-val',
         'voice-cap', 'voice-cap-val', 'bank-list', 'bank-count', 'btn-load-bank', 'device-list', 'btn-rescan',
         'btn-panic', 'btn-reset', 'kbd-toggle', 'piano', 'btn-oct-down', 'btn-oct-up',

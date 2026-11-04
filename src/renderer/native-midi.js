@@ -13,6 +13,7 @@ import { deviceMac, macFromDeviceId, normalizeMac } from './device-id.js';
 import { midiLayerLog, MIDI_LAYER_LOG_REV } from './midi-layer-log.js';
 import { midiTrace } from './midi-debug.js';
 import { trackFromRouteMidi } from './note-leak-guard.js';
+import { captureNativePlayed } from './performance-midi.js';
 
 export function nativeMidiPlugin() {
     if (typeof window === 'undefined') return null;
@@ -384,6 +385,7 @@ export class NativeMidiHub {
         // played=true：原生已发声；离线路由已从 setRoutes 剔除，此处不应再亮 UI
         if (ev.played) {
             trackFromRouteMidi(route, data, { applyTranspose: true });
+            captureNativePlayed(route, data);
             const info = peekNote(data);
             if (info) this.onActivity(id, info);
             return;

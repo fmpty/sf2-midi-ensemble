@@ -2,14 +2,19 @@ package com.sf2ensemble.synth;
 
 import android.app.Activity;
 import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.AssetManager;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.MediaStore;
 import android.provider.OpenableColumns;
+import android.util.Base64;
 
 import androidx.activity.result.ActivityResult;
 
@@ -256,6 +261,83 @@ public class SynthBridgePlugin extends Plugin {
                 call.reject(e.getMessage() == null ? "复制音源失败" : e.getMessage());
             }
         });
+    }
+
+    /** 把演奏 MIDI 写到系统「下载」文件夹，返回可在日志里展示的位置 */
+    @PluginMethod
+    public void saveMidi(PluginCall call) {
+        String filename = call.getString("filename", "performance.mid");
+        String data = call.getString("data");
+        if (data == null || data.isEmpty()) {
+            call.reject("没有可保存的演奏");
+            return;
+        }
+        final byte[] bytes;
+        try {
+            bytes = Base64.decode(data, Base64.DEFAULT);
+        } catch (IllegalArgumentException e) {
+            call.reject("演奏数据无效");
+            return;
+        }
+        if (bytes.length == 0) {
+            call.reject("没有可保存的演奏");
+            return;
+        }
+        if (filename == null || filename.isEmpty()) filename = "performance.mid";
+        filename = filename.replaceAll("[\\\\/:*?\"<>|]", "_");
+        if (!filename.toLowerCase().endsWith(".mid")) filename = filename + ".mid";
+        final String name = filename;
+        worker.execute(() -> {
+            try {
+                String where = writeMidiToDownloads(name, bytes);
+                JSObject res = new JSObject();
+                res.put("ok", true);
+                res.put("path", where);
+                res.put("name", name);
+                call.resolve(res);
+            } catch (Exception e) {
+                call.reject(e.getMessage() == null ? "保存失败" : e.getMessage());
+            }
+        });
+    }
+
+    private String writeMidiToDownloads(String name, byte[] bytes) throws java.io.IOException {
+        Context ctx = getContext();
+        if (ctx == null) throw new java.io.IOException("无 Context");
+        if (Build.VERSION.SDK_INT >= 29) {
+            ContentResolver cr = ctx.getContentResolver();
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+            values.put(MediaStore.MediaColumns.MIME_TYPE, "audio/midi");
+            values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+            values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+            Uri uri = cr.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+            if (uri == null) throw new java.io.IOException("无法写入下载目录");
+            try (OutputStream os = cr.openOutputStream(uri)) {
+                if (os == null) throw new java.io.IOException("无法写入下载目录");
+                os.write(bytes);
+            }
+            values.clear();
+            values.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            cr.update(uri, values, null, null);
+            String saved = name;
+            try (Cursor c = cr.query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+                if (c != null && c.moveToFirst()) {
+                    String n = c.getString(0);
+                    if (n != null && !n.isEmpty()) saved = n;
+                }
+            } catch (Exception ignored) {
+            }
+            return "下载/" + saved;
+        }
+        File dir = ctx.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+        if (dir == null) dir = ctx.getFilesDir();
+        if (!dir.exists() && !dir.mkdirs()) throw new java.io.IOException("无法创建目录");
+        File out = new File(dir, name);
+        try (FileOutputStream os = new FileOutputStream(out)) {
+            os.write(bytes);
+        }
+        return out.getAbsolutePath();
     }
 
     /** 载入音源：path 为空时自动取 APK 内置 assets 里的 SF2 */

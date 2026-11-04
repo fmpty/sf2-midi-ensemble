@@ -265,6 +265,27 @@ export class NativeSynthEngine {
 
     /* ------------------------------ 演奏 ------------------------------ */
 
+    controllerChange(channel, cc, value) {
+        const p = nativeSynthPlugin();
+        if (p) p.controlChange({ channel: clampCh(channel), cc: cc | 0, value: value | 0 }).catch(() => {});
+    }
+
+    pitchWheel(channel, value) {
+        const p = nativeSynthPlugin();
+        if (p) p.pitchBend({ channel: clampCh(channel), value: value | 0 }).catch(() => {});
+    }
+
+    programChange(channel, program, isDrum = false, bank = 0) {
+        const p = nativeSynthPlugin();
+        if (!p) return;
+        p.setChannel({
+            channel: clampCh(channel),
+            program: program | 0,
+            isDrum: !!isDrum || clampCh(channel) === 9,
+            bank: bank | 0,
+        }).catch(() => {});
+    }
+
     noteOn(channel, note, velocity) {
         const ch = clampCh(channel);
         const n = note | 0;

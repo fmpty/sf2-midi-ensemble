@@ -98,6 +98,17 @@
                 <div class="row row-toggles">
                     <button id="btn-reset" class="mini">复位合成器</button>
                 </div>
+                <div class="rec-box">
+                    <h2>演奏记录</h2>
+                    <p class="hint">记成 MIDI 文件，不录声音。可导出，也可导入 .mid 回放。</p>
+                    <div class="row row-toggles">
+                        <button id="btn-rec" type="button" class="mini">录制</button>
+                        <button id="btn-rec-play" type="button" class="mini" disabled>播放</button>
+                        <button id="btn-rec-export" type="button" class="mini" disabled>导出 MIDI</button>
+                        <button id="btn-rec-import" type="button" class="mini">导入 MIDI</button>
+                    </div>
+                    <p id="rec-status" class="hint">未录制</p>
+                </div>
             </div>
             <div class="panel grow">
                 <h2>日志</h2>
