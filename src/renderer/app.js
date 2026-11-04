@@ -3,6 +3,7 @@
  */
 import { NativeSynthEngine, isNativeSynthAvailable } from './native-synth.js';
 import { MidiHub, describeDevice } from './midi.js';
+import { routeAcceptsMidiInput } from './route-midi.js';
 import { NativeMidiHub, isNativeMidiAvailable } from './native-midi.js';
 import { ElectronMidiHub, isElectronDesktopMidiAvailable } from './electron-midi.js';
 import { VirtualKeyboard } from './keyboard.js';
@@ -11,6 +12,11 @@ import {
 } from './gm.js';
 import { getBuiltinSoundfont, openSoundfont, loadSoundfontPaths, storeGet, storeSet, getInfo, isMobile, isElectron, keepAwake, nativePianoBridge } from './platform.js';
 import { initLayout, tierFromWidth, scheduleSyncJianpuPianoMetrics } from './layout.js';
+import { installNoteLeakGuard } from './note-leak-guard.js';
+import { logMidiDeviceScanDiagnostics } from './device-scan-log.js';
+import { midiLayerLog, MIDI_LAYER_LOG_REV } from './midi-layer-log.js';
+import { midiTrace, setMidiDebugSink } from './midi-debug.js';
+import { MIDI_WEB_BUILD_ID } from './midi-build-id.js';
 import {
     dedupeDevices,
     deviceMac,
@@ -21,6 +27,7 @@ import {
     isMidiNamedDevice,
     isBluetoothMidiEntry,
     isMidiDeviceOnline,
+    isGenericMidiPlaceholderName,
 } from './device-id.js';
 
 const VIRTUAL_KEY = 'virtual:keyboard';
@@ -30,7 +37,7 @@ const state = {
     order: [],
     /** 按蓝牙 MAC 保存的手柄映射（断开后仍保留） */
     deviceProfiles: {},
-    master: { volume: 0.9, voiceCap: 160, lowLatency: true },
+    master: { volume: 0.9, voiceCap: 96, lowLatency: true },
     keyboardEnabled: true,
     selected: null,
     midiReady: false,
@@ -151,7 +158,11 @@ function pushRoutesToNative() {
     if (!engine.native || !engine.setRoutes) return;
     clearTimeout(routePushTimer);
     routePushTimer = setTimeout(() => {
-        engine.setRoutes(Object.values(state.routes).filter((r) => r.kind === 'midi' && r.deviceId));
+        engine.setRoutes(
+            Object.values(state.routes).filter(
+                (r) => r.kind === 'midi' && r.deviceId && r.online !== false,
+            ),
+        );
     }, 60);
 }
 
@@ -172,10 +183,13 @@ function persistDeviceProfilesFromRoutes() {
 function findMidiRouteByMac(mac) {
     if (!mac) return null;
     const norm = normalizeMac(mac);
+    let offline = null;
     for (const r of Object.values(state.routes)) {
-        if (r.kind === 'midi' && normalizeMac(r.deviceMac) === norm) return r;
+        if (r.kind !== 'midi' || normalizeMac(r.deviceMac) !== norm) continue;
+        if (r.online !== false) return r;
+        offline = r;
     }
-    return null;
+    return offline;
 }
 
 function routeKeyForDev(dev) {
@@ -191,29 +205,182 @@ function isSameMidiRoute(r, key, id, mac) {
     return rm === mac;
 }
 
+function rebindRouteToDevice(route, id, mac) {
+    const normMac = normalizeMac(mac);
+    const newKey = normMac ? `midi:mac:${normMac}` : `midi:${id}`;
+    const oldKey = route.key;
+    route.deviceId = id;
+    route.deviceMac = normMac || route.deviceMac || '';
+    route.key = newKey;
+    if (oldKey && oldKey !== newKey) {
+        delete state.routes[oldKey];
+        state.routes[newKey] = route;
+        state.order = state.order.map((k) => (k === oldKey ? newKey : k));
+        if (state.selected === oldKey) state.selected = newKey;
+    }
+}
+
+/**
+ * 实际在发 MIDI 的手柄绑定到一条路由（按 MAC；否则占一条「扫描里已断开」的卡）。
+ * 避免两卡同名、id 仍是 3#xx 时两卡同闪、native setRoutes 对不上 bt#。
+ */
+function ensureRouteForMac(id, mac) {
+    const normMac = normalizeMac(mac);
+    if (!normMac) return null;
+    const key = `midi:mac:${normMac}`;
+    let route = state.routes[key];
+    if (!route) {
+        for (const k of [...state.order]) {
+            const r = state.routes[k];
+            if (!r || r.kind !== 'midi') continue;
+            if (normalizeMac(r.deviceMac) === normMac || isSameMidiRoute(r, key, id, normMac)) {
+                route = r;
+                break;
+            }
+        }
+    }
+    if (!route) {
+        route = defaultRoute(key, 'MIDI 设备', 'midi', pickChannel(null));
+        if (state.deviceProfiles[normMac]) applyRouteProfile(route, state.deviceProfiles[normMac]);
+        state.routes[key] = route;
+        if (!state.order.includes(key)) state.order.push(key);
+    }
+    rebindRouteToDevice(route, id, normMac);
+    return route;
+}
+
+function claimOrUpdateRouteFromMidiDevice(deviceId, deviceMacHint) {
+    const id = String(deviceId);
+    let mac = normalizeMac(deviceMacHint || macFromDeviceId(id));
+    if (!mac && hub?.devices) {
+        const dev = hub.devices.find((d) => String(d.id) === id);
+        mac = normalizeMac(deviceMac(dev));
+    }
+    if (!mac) return null;
+
+    const route = ensureRouteForMac(id, mac);
+    if (!route) return null;
+
+    let changed = false;
+    // 在线只由 syncDevices + portOpen 决定，勿因 MIDI 误报「已连接」（与库乐队：只看会话/端口是否真正打开一致）
+    const dev = hub?.devices?.find((d) => normalizeMac(deviceMac(d)) === mac);
+    if (dev?.name && route.name !== dev.name) {
+        route.name = dev.name;
+        changed = true;
+    }
+    if (changed) {
+        persistDeviceProfilesFromRoutes();
+        saveConfig();
+        pushRoutesToNative();
+        renderDevices();
+    }
+    return route;
+}
+
+/** 在线只跟原生 devices[]（portOpen）一致；不断开时的误报由 MidiBridge 层保证 */
+function routeOnlineFromScan(id, mac, onlineIds, onlineMacs) {
+    if ((id && onlineIds.has(id)) || (mac && onlineMacs.has(mac))) return true;
+    return false;
+}
+
+/** 与 hub 当前列表一致地 sync（原生用 _lastRawNative，避免 raw=0/list=1） */
+function syncHubDevices(opts = {}) {
+    const list = Array.isArray(hub?.devices) ? hub.devices : [];
+    let rawNative = list;
+    if (isNativeMidiAvailable() && hub && Array.isArray(hub._lastRawNative)) {
+        rawNative = hub._lastRawNative;
+    }
+    syncDevices(list, { ...opts, rawNative });
+}
+
+/**
+ * 同名双 MAC 时去掉从未出现在扫描里的幽灵路由（如旧 bt# 与真实 3#xx）。
+ * 各平台通用，仅删长期 offline 且 MAC 不在本次扫描集合里的重复项。
+ */
+function pruneGhostMidiRoutes(scanMacs, onlineMacs) {
+    const inScan = new Set(scanMacs);
+    for (const m of onlineMacs) inScan.add(m);
+    const groups = new Map();
+    for (const r of Object.values(state.routes)) {
+        if (r.kind !== 'midi') continue;
+        const label = String(r.label || r.name || '').trim().toLowerCase();
+        if (!label) continue;
+        if (!groups.has(label)) groups.set(label, []);
+        groups.get(label).push(r);
+    }
+    let changed = false;
+    for (const group of groups.values()) {
+        if (group.length < 2) continue;
+        const macInScan = group.filter((r) => {
+            const m = normalizeMac(r.deviceMac) || normalizeMac(macFromDeviceId(r.deviceId));
+            return m && inScan.has(m);
+        });
+        if (macInScan.length !== 1) continue;
+        const keep = macInScan[0];
+        for (const r of group) {
+            if (r === keep) continue;
+            const m = normalizeMac(r.deviceMac) || normalizeMac(macFromDeviceId(r.deviceId));
+            if (!m || inScan.has(m) || r.online) continue;
+            if (m && state.deviceProfiles[m]) {
+                const km = normalizeMac(keep.deviceMac);
+                if (km) {
+                    state.deviceProfiles[km] = {
+                        ...state.deviceProfiles[km],
+                        ...state.deviceProfiles[m],
+                    };
+                }
+            }
+            delete state.routes[r.key];
+            state.order = state.order.filter((k) => k !== r.key);
+            if (state.selected === r.key) state.selected = keep.key;
+            changed = true;
+        }
+    }
+    return changed;
+}
+
 let syncDevicesTimer = 0;
+/** @type {{ list: unknown[], opts: Record<string, unknown> } | null} */
+let syncDevicesPending = null;
 
 /**
  * @param {unknown[]} list
  * @param {{ markOfflineWhenEmpty?: boolean, immediate?: boolean }} [opts]
  */
 function syncDevices(list, opts = {}) {
+    syncDevicesPending = { list, opts: { ...opts } };
     const run = () => {
+        const pending = syncDevicesPending;
+        syncDevicesPending = null;
+        if (!pending) return;
+        const { list: pendingList, opts: pendingOpts } = pending;
         let changed = false;
-        const raw = Array.isArray(list) ? list : [];
+        let raw = Array.isArray(pendingList) ? pendingList : [];
+        const rawNative = Array.isArray(pendingOpts.rawNative) ? pendingOpts.rawNative : raw;
+        if (isNativeMidiAvailable() && rawNative.length === 0 && raw.length > 0) {
+            raw = [];
+        }
+        midiLayerLog('L5-js', 'syncDevices begin', {
+            rawN: raw.length,
+            rawNativeN: rawNative.length,
+            manualProbe: !!pendingOpts.manualProbe,
+            disconnectedMac: pendingOpts.disconnectedMac || null,
+        });
         const devices = dedupeDevices(raw);
-        /** 仅「当前在线」设备参与在线判定，断开/空列表也要标离线 */
-        const seenOnline = new Set();
+        /** 当前扫描里真正在线的设备 id / MAC（换绑后旧 MAC 不在集合内 → 旧卡显示断开） */
+        const onlineIds = new Set();
+        const onlineMacs = new Set();
 
         for (const dev of devices) {
             if (isBluetoothMidiEntry(dev) && !isMidiNamedDevice(dev)) continue;
+            if (isGenericMidiPlaceholderName(dev.name)) continue;
             const id = String(dev.id);
-            const mac = deviceMac(dev);
+            const mac = normalizeMac(deviceMac(dev));
             const key = routeKeyForDev(dev);
             const online = isMidiDeviceOnline(dev);
             if (online) {
-                seenOnline.add(key);
-                seenOnline.add(`midi:${id}`);
+                onlineIds.add(id);
+                if (mac) onlineMacs.add(mac);
             }
 
             for (const k of [...state.order]) {
@@ -241,25 +408,53 @@ function syncDevices(list, opts = {}) {
             }
 
             const route = state.routes[key];
+            const prevId = route.deviceId ? String(route.deviceId) : '';
             route.key = key;
             route.name = dev.name;
             route.deviceId = id;
             route.deviceMac = mac || route.deviceMac || '';
+            if (prevId && prevId !== id) changed = true;
             route.guessBluetooth = dev.guessBluetooth;
             route.online = online;
         }
 
+        const scanSeen = isNativeMidiAvailable() && hub && hub._nativeScanSeen;
+        const skipOfflineSweep = devices.length === 0 && isNativeMidiAvailable() && !scanSeen;
+        const forcedOffMac = pendingOpts.disconnectedMac ? normalizeMac(pendingOpts.disconnectedMac) : '';
+        const probeEntries = pendingOpts.manualProbe && pendingOpts.probe?.entries
+            ? pendingOpts.probe.entries
+            : null;
         for (const r of Object.values(state.routes)) {
             if (r.kind !== 'midi') continue;
-            const mac = normalizeMac(r.deviceMac) || macFromDeviceId(r.deviceId);
-            let on = seenOnline.has(r.key) || (r.deviceId && seenOnline.has(`midi:${r.deviceId}`));
-            if (!on && mac) {
-                on = devices.some((d) => isMidiDeviceOnline(d) && deviceMac(d) === mac);
+            const mac = normalizeMac(r.deviceMac) || normalizeMac(macFromDeviceId(r.deviceId));
+            const id = r.deviceId ? String(r.deviceId) : '';
+            if (forcedOffMac && mac === forcedOffMac) {
+                if (r.online !== false) changed = true;
+                r.online = false;
+                if (r.deviceMac) state.deviceProfiles[r.deviceMac] = snapshotRouteProfile(r);
+                continue;
             }
+            if (probeEntries && mac) {
+                const pe = probeEntries.find((e) => normalizeMac(e.mac) === mac);
+                const on = !!(pe && (pe.statusCode === 3 || pe.portOpen === true));
+                if (r.online !== on) changed = true;
+                r.online = on;
+                if (!on && r.deviceMac) state.deviceProfiles[r.deviceMac] = snapshotRouteProfile(r);
+                continue;
+            }
+            if (skipOfflineSweep) continue;
+            const on = routeOnlineFromScan(id, mac, onlineIds, onlineMacs);
             if (r.online !== on) changed = true;
             r.online = on;
             if (!on && r.deviceMac) state.deviceProfiles[r.deviceMac] = snapshotRouteProfile(r);
         }
+
+        const scanMacs = new Set();
+        for (const dev of devices) {
+            const m = normalizeMac(deviceMac(dev));
+            if (m) scanMacs.add(m);
+        }
+        if (pruneGhostMidiRoutes(scanMacs, onlineMacs)) changed = true;
 
         if (!state.routes[VIRTUAL_KEY]) {
             state.routes[VIRTUAL_KEY] = defaultRoute(VIRTUAL_KEY, '电脑键盘（虚拟手柄）', 'virtual', pickChannel(null));
@@ -273,11 +468,38 @@ function syncDevices(list, opts = {}) {
             saveConfig();
             pushRoutesToNative();
         }
+
+        const routeSummary = Object.values(state.routes)
+            .filter((r) => r.kind === 'midi')
+            .map((r) => ({
+                key: r.key,
+                mac: r.deviceMac,
+                deviceId: r.deviceId,
+                online: r.online,
+            }));
+        midiLayerLog('L5-js', 'syncDevices end', { onlineIds: [...onlineIds], onlineMacs: [...onlineMacs], routes: routeSummary });
+
+        if (isNativeMidiAvailable()) {
+            logMidiDeviceScanDiagnostics({
+                rawNative,
+                listInput: raw,
+                deduped: devices,
+                onlineIds,
+                onlineMacs,
+                routes: state.routes,
+                extra: pendingOpts,
+                hub,
+                routeOnlineFromScan,
+                logFn: log,
+            });
+        }
+
         renderDevices();
         renderPiano();
     };
 
     if (opts.immediate) {
+        clearTimeout(syncDevicesTimer);
         run();
         return;
     }
@@ -287,24 +509,25 @@ function syncDevices(list, opts = {}) {
 
 function resolveRouteForDeviceId(deviceId) {
     const id = String(deviceId);
-    for (const r of Object.values(state.routes)) {
-        if (r.kind === 'midi' && r.deviceId === id) return r;
+    const midiRoutes = () => Object.values(state.routes).filter((r) => r.kind === 'midi');
+    const mac = normalizeMac(macFromDeviceId(id));
+
+    if (mac) {
+        const byMac = findMidiRouteByMac(mac) || state.routes[`midi:mac:${mac}`];
+        if (byMac) return byMac;
     }
-    if (id.startsWith('electron-midi:')) {
-        const idx = id.slice('electron-midi:'.length);
-        for (const r of Object.values(state.routes)) {
-            if (r.kind === 'midi' && String(r.deviceId).startsWith('electron-midi:') && String(r.deviceId).endsWith(`:${idx}`)) return r;
-        }
-    }
-    const mac = macFromDeviceId(id);
-    if (mac) return findMidiRouteByMac(mac);
-    const byKey = state.routes[`midi:${id}`] || state.routes[`midi:mac:${mac}`];
-    if (byKey) return byKey;
-    const hit = hub?.devices?.find((d) => d.id === id);
-    if (hit?.name) {
-        for (const r of Object.values(state.routes)) {
-            if (r.kind === 'midi' && r.name === hit.name) return r;
-        }
+
+    let route = state.routes[`midi:${id}`];
+    if (route) return route;
+
+    route = midiRoutes().find((r) => r.deviceId === id);
+    if (route) return route;
+
+    const hit = hub?.devices?.find((d) => String(d.id) === id);
+    const hitMac = normalizeMac(hit ? deviceMac(hit) : '');
+    if (hitMac) {
+        const byMac = findMidiRouteByMac(hitMac);
+        if (byMac) return byMac;
     }
     return null;
 }
@@ -318,17 +541,18 @@ function renderDevices() {
     const keys = state.order.filter((k) => state.routes[k]);
     for (const key of keys) {
         const r = state.routes[key];
+        const showOff = r.online === false;
         const card = document.createElement('div');
-        card.className = `card${r.online === false ? ' offline' : ''}${state.selected === key ? ' selected' : ''}`;
+        card.className = `card${showOff ? ' offline' : ''}${state.selected === key ? ' selected' : ''}`;
         card.dataset.key = key;
         card.innerHTML = `
             <div class="card-head">
                 <div class="card-title">
-                    <span class="dot ${r.online === false ? 'dot-off' : 'dot-on'}"></span>
+                    <span class="dot ${showOff ? 'dot-off' : 'dot-on'}"></span>
                     <input class="label-input" value="${escapeHtml(r.label || r.name)}" title="自定义名称" />
                     ${r.kind === 'virtual' ? '<span class="tag">虚拟</span>' : ''}
                     ${r.guessBluetooth || r.deviceMac ? '<span class="tag tag-ble">蓝牙</span>' : ''}
-                    ${r.online === false ? '<span class="tag tag-off">已断开</span>' : ''}
+                    ${showOff ? '<span class="tag tag-off">已断开</span>' : ''}
                 </div>
                 <div class="card-actions">
                     <label class="switch"><input type="checkbox" data-field="enabled" ${r.enabled ? 'checked' : ''}><span>启用</span></label>
@@ -367,10 +591,10 @@ function renderDevices() {
     if (!keys.length) {
         wrap.innerHTML = '<div class="empty">尚未检测到 MIDI 手柄。请先在系统蓝牙中配对手柄，再点击下方「刷新手柄列表」。</div>';
     }
-    const online = keys.filter((k) => state.routes[k].online !== false).length;
+    const midiCards = keys.filter((k) => state.routes[k].kind === 'midi').length;
     if (dom.devCount) {
-        dom.devCount.textContent = String(online);
-        dom.devCount.classList.toggle('show', online > 0);
+        dom.devCount.textContent = String(midiCards);
+        dom.devCount.classList.toggle('show', midiCards > 0);
     }
 }
 
@@ -974,7 +1198,6 @@ async function loadConfig() {
 async function ensureEngine(retry = false) {
     if (engine.started) { if (engine.ctx) await engine.ctx.resume(); return; }
     dom.btnStart.disabled = true;
-    dom.btnStart.textContent = '启动中…';
     try {
         await engine.start({ lowLatency: state.master.lowLatency !== false });
         engine.setMasterVolume(state.master.volume);
@@ -999,20 +1222,23 @@ async function ensureEngine(retry = false) {
             }
             await restoreExternalBanks();
         }
+        dom.startOverlay.classList.add('hidden');
+        updateStatus();
         applyAllRoutes();
         await connectMidi();
-        updateStatus();
-        dom.startOverlay.classList.add('hidden');
     } catch (e) {
         // 原生合成不可用（老设备 / 缺 AAudio / 音源缺失）时回退到 WebAudio，保证能发声
         if (!retry && engine.native) {
             log(`原生合成不可用（${e.message}），回退 WebAudio + spessasynth`, 'warn');
-            swapEngine(await createWebSynthEngine());
-            return ensureEngine(true);
+            try {
+                swapEngine(await createWebSynthEngine());
+                return ensureEngine(true);
+            } catch (e2) {
+                log(`Web 合成回退失败：${e2.message}`, 'error');
+            }
         }
         log(`启动失败：${e.message}`, 'error');
         dom.btnStart.disabled = false;
-        dom.btnStart.textContent = '启动音频引擎';
     }
 }
 
@@ -1037,9 +1263,9 @@ function toArrayBuffer(data) {
     return new Uint8Array(data).buffer;
 }
 
-async function connectMidi() {
+async function connectMidi(opts = {}) {
     try {
-        await hub.connect();
+        await hub.connect(opts);
         state.midiReady = true;
         if (dom.midiStatus) {
             dom.midiStatus.textContent = `MIDI 就绪${hub.sysex ? '（含 SysEx）' : ''}`;
@@ -1052,7 +1278,7 @@ async function connectMidi() {
         }
         log(`MIDI 初始化失败：${e.message}`, 'warn');
     }
-    syncDevices(hub.devices, { immediate: true });
+    syncHubDevices({ immediate: true });
 }
 
 function updateStatus() {
@@ -1096,56 +1322,93 @@ function bindTabs() {
 
 const RESCAN_LABEL = '刷新手柄列表';
 
-async function rescanMidiDevices() {
+function resetRescanButton() {
     const btn = dom.btnRescan;
-    if (btn) {
-        btn.disabled = true;
-        btn.textContent = '正在读取系统设备…';
+    if (!btn) return;
+    btn.disabled = false;
+    btn.textContent = RESCAN_LABEL;
+}
+
+function logRescanResult() {
+    state.midiReady = true;
+    const n = hub.devices.length;
+    if (n) {
+        log(`已刷新，当前 ${n} 个 MIDI 设备`, 'ok');
+        for (const d of hub.devices) log(`  · ${describeDevice(d)} · ${d.state || '?'}`, 'info');
+    } else if (isElectron()) {
+        log('未发现 MIDI 设备。Windows：确认蓝牙里已连接；若系统有设备但此处仍为空，可安装 KORG BLE-MIDI 驱动或 Microsoft Store 的「MIDIberry」桥接后再刷新', 'warn');
+    } else {
+        log('未发现 MIDI 设备', 'warn');
     }
-    try {
-        if (!hub.available) {
-            log('当前环境不支持 Web MIDI（PC 请使用本应用安装版或 Chrome/Edge）', 'error');
-            return;
-        }
-        if (!engine.started) {
-            log('请先点击「启动音频引擎」，再刷新 MIDI 设备', 'warn');
-        }
-        await hub.rescan();
-        state.midiReady = true;
-        syncDevices(hub.devices, { immediate: true });
-        const n = hub.devices.length;
-        if (isElectronDesktopMidiAvailable()) {
-            try {
-                const rt = await window.api.midiListDevices();
-                log(`系统 MIDI 输入端口（WinMM）：${rt.length} 个`, rt.length ? 'ok' : 'info');
-            } catch { /* 忽略 */ }
-        }
-        if (n) {
-            log(`已刷新，当前 ${n} 个 MIDI 设备`, 'ok');
-            for (const d of hub.devices) log(`  · ${describeDevice(d)} · ${d.state || '?'}`, 'info');
-        } else if (isElectron()) {
-            log('未发现 MIDI 设备。Windows：确认蓝牙里已连接；若系统有设备但此处仍为空，可安装 KORG BLE-MIDI 驱动或 Microsoft Store 的「MIDIberry」桥接后再刷新', 'warn');
-        } else {
-            log('未发现 MIDI 设备', 'warn');
-        }
-    } catch (e) {
-        state.midiReady = false;
-        log(`刷新失败：${e.message}`, 'error');
-        if (isElectron()) {
-            log('若从未授权 MIDI，请先点「启动音频引擎」并在系统弹窗中选择允许', 'info');
-        }
-    } finally {
-        if (btn) {
-            btn.disabled = false;
-            btn.textContent = RESCAN_LABEL;
-        }
+}
+
+/** 仅「刷新手柄列表」按钮：不改按钮文案、不禁用，避免卡在「正在读取…」类状态 */
+function rescanMidiDevices() {
+    resetRescanButton();
+    if (!hub.available) {
+        log('当前环境不支持 Web MIDI（PC 请使用本应用安装版或 Chrome/Edge）', 'error');
+        return;
     }
+    if (!engine.started) {
+        log('请先点击「启动音频引擎」，再刷新 MIDI 设备', 'warn');
+    }
+    log(isNativeMidiAvailable() ? '正在刷新设备列表（见下方日志）…' : '正在刷新 MIDI 设备…', 'info');
+    midiTrace('ui-rescan-click');
+
+    void (async () => {
+        try {
+            if (isNativeMidiAvailable() && typeof hub.refreshList === 'function') {
+                await Promise.race([
+                    hub.refreshList(),
+                    new Promise((_, reject) => {
+                        setTimeout(() => reject(new Error('读列表超时（8s）')), 8000);
+                    }),
+                ]);
+            } else if (isNativeMidiAvailable()) {
+                await Promise.race([
+                    hub.refresh?.(),
+                    new Promise((_, reject) => {
+                        setTimeout(() => reject(new Error('读列表超时（8s）')), 8000);
+                    }),
+                ]);
+                if (typeof hub.rescan === 'function') {
+                    void Promise.resolve(hub.rescan({ quick: true })).catch((e) => {
+                        log(`MIDI 扫描：${e.message}`, 'warn');
+                    });
+                }
+            } else {
+                await Promise.race([
+                    hub.rescan(),
+                    new Promise((_, reject) => {
+                        setTimeout(() => reject(new Error('刷新超时（12s）')), 12000);
+                    }),
+                ]);
+            }
+            if (isElectronDesktopMidiAvailable()) {
+                try {
+                    const rt = await window.api.midiListDevices();
+                    log(`系统 MIDI 输入端口（WinMM）：${rt.length} 个`, rt.length ? 'ok' : 'info');
+                } catch { /* 忽略 */ }
+            }
+            midiTrace('ui-rescan-click-done');
+            logRescanResult();
+        } catch (e) {
+            state.midiReady = false;
+            log(`刷新失败：${e.message}`, 'error');
+            if (isElectron()) {
+                log('若从未授权 MIDI，请先点「启动音频引擎」并在系统弹窗中选择允许', 'info');
+            }
+        } finally {
+            resetRescanButton();
+        }
+    })();
 }
 
 function bindUI() {
     bindTabs();
     dom.btnStart.addEventListener('click', () => ensureEngine());
     dom.btnRescan.addEventListener('click', () => rescanMidiDevices());
+    resetRescanButton();
     if (dom.btnOctDown) dom.btnOctDown.addEventListener('click', () => shiftPianoOctave(-1));
     if (dom.btnOctUp) dom.btnOctUp.addEventListener('click', () => shiftPianoOctave(1));
     dom.btnPanic.addEventListener('click', () => {
@@ -1218,6 +1481,7 @@ export async function startApp() {
 }
 
 async function main() {
+    installNoteLeakGuard(engine, (msg) => log(msg, 'info'));
     const ids = ['btn-start', 'start-overlay', 'status-audio', 'audio-dot', 'master-volume', 'master-volume-val',
         'voice-cap', 'voice-cap-val', 'bank-list', 'bank-count', 'btn-load-bank', 'device-list', 'btn-rescan',
         'btn-panic', 'btn-reset', 'kbd-toggle', 'piano', 'btn-oct-down', 'btn-oct-up',
@@ -1229,12 +1493,36 @@ async function main() {
     bindUI();
 
     hub.resolveRoute = (deviceId) => resolveRouteForDeviceId(deviceId);
-    hub.onDevices = (list) => syncDevices(list, { immediate: true });
+    hub.onDevices = (list, extra = {}) => syncDevices(list, {
+        ...extra,
+        immediate: true,
+        rawNative: extra.rawNative ?? list,
+    });
+    hub.onRawMidi = (deviceId, deviceMacHint) => {
+        claimOrUpdateRouteFromMidiDevice(deviceId, deviceMacHint);
+    };
     hub.onActivity = (deviceId, info) => {
-        const route = resolveRouteForDeviceId(deviceId);
-        flashActivity(route ? route.key : `midi:${deviceId}`, info.note, info.velocity);
+        const route = resolveRouteForDeviceId(deviceId)
+            || claimOrUpdateRouteFromMidiDevice(deviceId);
+        if (!route || !routeAcceptsMidiInput(route)) return;
+        flashActivity(route.key, info.note, info.velocity);
     };
     hub.onError = (e) => log(`MIDI 错误：${e.message}`, 'error');
+    setMidiDebugSink((line) => log(line, 'info'));
+
+    midiLayerLog('L4-cap', 'web-boot', {
+        rev: MIDI_LAYER_LOG_REV,
+        build: MIDI_WEB_BUILD_ID,
+        native: isNativeMidiAvailable(),
+    });
+
+    if (isNativeMidiAvailable() && typeof hub.requestBluetoothPermissionsAtLaunch === 'function') {
+        setTimeout(() => {
+            hub.requestBluetoothPermissionsAtLaunch().catch((e) => {
+                log(`蓝牙权限：${e.message}`, 'warn');
+            });
+        }, 400);
+    }
 
     vkb.resolveRoute = () => state.routes[VIRTUAL_KEY] || null;
     vkb.onTransposeChange = (delta) => {
@@ -1269,6 +1557,8 @@ async function main() {
     });
 
     await loadConfig();
+    if (state.master.voiceCap > 128) state.master.voiceCap = 128;
+    if (state.master.voiceCap < 32) state.master.voiceCap = 32;
     initLayout(() => renderPiano());
     // 手机 / 平板 CPU 有限，复音过多会导致欠载与卡顿
     if (!state.master.tuned) {
@@ -1315,10 +1605,10 @@ async function main() {
     syncDevices([]);
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState !== 'visible' || !state.midiReady) return;
-        if (isNativeMidiAvailable() || isElectronDesktopMidiAvailable()) {
-            Promise.resolve(hub.refresh())
-                .then(() => syncDevices(hub.devices, { immediate: true }))
-                .catch(() => {});
+        if (isNativeMidiAvailable()) {
+            Promise.resolve(hub.rescan?.({ quick: true })).catch(() => {});
+        } else if (isElectronDesktopMidiAvailable()) {
+            Promise.resolve(hub.refresh?.()).catch(() => {});
         }
     });
     setInterval(updateStatus, 500);

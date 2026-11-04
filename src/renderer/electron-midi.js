@@ -55,7 +55,7 @@ export class ElectronMidiHub {
         return isElectronDesktopMidiAvailable() || this.web.available;
     }
 
-    async connect() {
+    async connect(_opts = {}) {
         if (!this._unsubMidi && window.api.onMidiBytes) {
             this._unsubMidi = window.api.onMidiBytes(({ deviceId, data }) => {
                 this.handleRt(deviceId, new Uint8Array(data));
@@ -90,7 +90,7 @@ export class ElectronMidiHub {
             }
             this.devices = rtList;
         }
-        this.onDevices(this.devices);
+        this.onDevices(this.devices, { rawNative: this.devices });
     }
 
     refresh() {

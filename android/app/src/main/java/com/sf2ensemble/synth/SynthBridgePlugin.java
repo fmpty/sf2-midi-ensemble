@@ -163,8 +163,10 @@ public class SynthBridgePlugin extends Plugin {
             note += r.transpose;
             if (note < 0) note = 0;
             if (note > 127) note = 127;
-            if (vel > 0) nativeNoteOn(ch, note, vel);
-            else nativeNoteOff(ch, note);
+            if (vel > 0) {
+                nativeNoteOff(ch, note);
+                nativeNoteOn(ch, note, vel);
+            } else nativeNoteOff(ch, note);
             return true;
         }
         if (type == 0xb0) {
@@ -339,15 +341,28 @@ public class SynthBridgePlugin extends Plugin {
 
     @PluginMethod
     public void start(PluginCall call) {
-        boolean ok = nativeStart();
-        JSObject res = new JSObject();
-        res.put("running", ok);
-        res.put("sampleRate", nativeGetSampleRate());
-        res.put("bufferFrames", nativeGetBufferFrames());
-        res.put("burstFrames", nativeGetBurstFrames());
-        int rate = nativeGetSampleRate();
-        res.put("bufferMs", rate > 0 ? (nativeGetBufferFrames() * 1000 / rate) : 0);
-        call.resolve(res);
+        if (!libOk) {
+            call.reject("原生合成库未加载");
+            return;
+        }
+        if (!bankLoaded || nativeGetBankCount() <= 0) {
+            call.reject("请先载入音源");
+            return;
+        }
+        try {
+            boolean ok = nativeStart();
+            JSObject res = new JSObject();
+            res.put("running", ok);
+            res.put("sampleRate", nativeGetSampleRate());
+            res.put("bufferFrames", nativeGetBufferFrames());
+            res.put("burstFrames", nativeGetBurstFrames());
+            int rate = nativeGetSampleRate();
+            res.put("bufferMs", rate > 0 ? (nativeGetBufferFrames() * 1000 / rate) : 0);
+            call.resolve(res);
+        } catch (Throwable t) {
+            android.util.Log.e("SynthBridge", "start 失败", t);
+            call.reject(t.getMessage() != null ? t.getMessage() : "AAudio 启动失败");
+        }
     }
 
     @PluginMethod
@@ -429,6 +444,8 @@ public class SynthBridgePlugin extends Plugin {
                     r.enabled = o.optBoolean("enabled", true);
                     r.allowProgramChange = o.optBoolean("allowProgramChange", false);
                     routes.put(o.optString("deviceId", ""), r);
+                    String mac = o.optString("mac", "").replace(":", "").replace("-", "").toUpperCase(java.util.Locale.US);
+                    if (mac.length() == 12) routes.put("bt#" + mac, r);
                 }
             } catch (Exception ignored) {
             }

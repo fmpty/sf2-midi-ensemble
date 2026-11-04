@@ -131,6 +131,14 @@ public class MidiBridgePlugin: CAPPlugin {
         }
     }
 
+    @objc func getBluetoothPermissionState(_ call: CAPPluginCall) {
+        call.resolve(["granted": true])
+    }
+
+    @objc func requestBluetoothPermissions(_ call: CAPPluginCall) {
+        call.resolve(["granted": true, "alreadyHad": true])
+    }
+
     @objc func getDevices(_ call: CAPPluginCall) {
         connectAllSources()
         call.resolve(["devices": devices])

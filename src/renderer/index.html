@@ -71,7 +71,7 @@
             <div id="device-list" class="device-list"></div>
             <div class="device-foot">
                 <button id="btn-rescan" type="button" class="primary scan-btn">刷新手柄列表</button>
-                <p class="hint">请先在系统「设置 → 蓝牙」中配对手柄（名称通常含 MIDI 字样），并保持<strong>已连接</strong>；在本应用中先点「启动音频引擎」，再点「刷新手柄列表」。若弹出蓝牙或附近设备等权限请务必允许；刚配对后若未出现，可多刷新几次或重启应用，并等待约 2～10 秒。</p>
+                <p class="hint">先在系统蓝牙中配对名称含 MIDI 的手柄，保持已连接后再点刷新。</p>
             </div>
         </section>
 
@@ -88,8 +88,8 @@
         <section id="pane-more" class="tab-pane">
             <div class="panel">
                 <div class="row"><label>复音上限</label>
-                    <input id="voice-cap" type="range" min="32" max="512" step="16" value="160" />
-                    <span id="voice-cap-val" class="val">160</span>
+                    <input id="voice-cap" type="range" min="32" max="128" step="8" value="96" />
+                    <span id="voice-cap-val" class="val">96</span>
                 </div>
                 <div class="row row-toggles">
                     <label class="chk"><input id="low-latency" type="checkbox" checked />低延迟缓冲</label>

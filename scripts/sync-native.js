@@ -70,10 +70,22 @@ function syncAndroid() {
 
     if (fs.existsSync(ANDROID_MANIFEST)) {
         let xml = fs.readFileSync(ANDROID_MANIFEST, 'utf8');
+        let manifestChanged = false;
         if (!xml.includes('android.software.midi')) {
             xml = xml.replace(/(\s*)(<application)/, `$1${ANDROID_PERMISSIONS}$1$2`);
-            writeIfChanged(ANDROID_MANIFEST, xml);
+            manifestChanged = true;
         }
+        if (xml.includes('android:extractNativeLibs="true"')) {
+            xml = xml.replace(/android:extractNativeLibs="true"/, 'android:extractNativeLibs="false"');
+            manifestChanged = true;
+        } else if (!/android:extractNativeLibs=/.test(xml) && xml.includes('<application')) {
+            xml = xml.replace(
+                /(<application\b)/,
+                '$1\n        android:extractNativeLibs="false"',
+            );
+            manifestChanged = true;
+        }
+        if (manifestChanged) writeIfChanged(ANDROID_MANIFEST, xml);
     } else {
         console.log('  未找到 AndroidManifest.xml');
     }
@@ -109,7 +121,31 @@ function patchAndroidBuild() {
     if (fs.existsSync(gradle)) {
         let text = fs.readFileSync(gradle, 'utf8');
         if (!text.includes('ndkVersion')) {
-            text = text.replace(/(android \{\s*\n)/, '$1    ndkVersion "25.2.9519653"\n');
+            text = text.replace(/(android \{\s*\n)/, '$1    ndkVersion "28.0.13004108"\n');
+        }
+        /* ndkVersion 具体版本由 build-android 的 ensure-ndk.js 按本机已安装 NDK 写入，勿在此强制覆盖 */
+        if (!text.includes('ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES')) {
+            text = text.replace(
+                /(defaultConfig \{[\s\S]*?)(^\s*\}\s*\n\s*externalNativeBuild)/m,
+                `$1        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
+            }
+        }
+$2`,
+            );
+        }
+        if (!text.includes('useLegacyPackaging')) {
+            text = text.replace(
+                /(\n    buildTypes \{)/,
+                `
+    packaging {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+$1`,
+            );
         }
         if (!text.includes('externalNativeBuild')) {
             text = text.replace(/(\n    buildTypes \{)/, `

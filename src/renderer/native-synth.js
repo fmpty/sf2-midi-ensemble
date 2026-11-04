@@ -92,21 +92,26 @@ export class NativeSynthEngine {
         if (!bank || !bank.ok) throw new Error('原生音源载入失败（未找到内置 SF2）');
 
         const res = await p.start();
+        if (!res || !res.running) {
+            throw new Error('原生音频输出未启动（AAudio 不可用或被占用）');
+        }
         this.sampleRate = res.sampleRate || 0;
         this.bufferFrames = res.bufferFrames || 0;
         this.burstFrames = res.burstFrames || 0;
         this.bufferMs = res.bufferMs || 0;
         this.started = true;
-        this.running = !!res.running;
+        this.running = true;
 
         const label = bank.path ? bank.path.split('/').pop() : '内置音源';
         this.bankMeta = [{ name: label, path: bank.path || '', builtin: true }];
         this.syncBankIds();
         this.emit('banks', this.banks);
 
-        await this.refreshPresets();
         this.emit('started');
         this.pollTimer = setInterval(() => this.refreshStatus(), 500);
+        setTimeout(() => {
+            this.refreshPresets().catch(() => {});
+        }, 0);
     }
 
     async refreshPresets() {
@@ -238,6 +243,8 @@ export class NativeSynthEngine {
         if (!p) return;
         const list = routes.map((r) => ({
             deviceId: r.deviceId,
+            mac: r.deviceMac || '',
+            mac: r.deviceMac || '',
             channel: clampCh(r.channel),
             transpose: r.transpose,
             velocityGain: r.velocityGain,

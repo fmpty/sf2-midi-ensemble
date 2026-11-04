@@ -122,10 +122,20 @@ function prepareAndroidProject() {
         process.exit(1);
     }
     prepareAndroidProject(javaHome);
+    {
+        const ensureNdk = path.join(ROOT, 'scripts', 'ensure-ndk.js');
+        console.log(`> node ${path.relative(ROOT, ensureNdk)}`);
+        const ndkRun = spawnSync(process.execPath, [ensureNdk], {
+            stdio: 'inherit',
+            cwd: ROOT,
+            shell: false,
+        });
+        if (ndkRun.status !== 0) process.exit(ndkRun.status || 1);
+    }
 
     const args = [
         path.join(androidDir, 'gradlew.bat'),
-        'assembleDebug',
+        ':app:assembleDebug',
         '--no-problems-report',
         '--init-script', path.join(ROOT, 'scripts', 'gradle-mirrors.gradle'),
     ];
@@ -144,16 +154,65 @@ function prepareAndroidProject() {
     });
     const apk = path.join(androidDir, 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk');
     const apkOk = fs.existsSync(apk);
+    const bootInApkTree = path.join(ROOT, 'android', 'app', 'src', 'main', 'assets', 'public', 'dist', 'boot.js');
+    if (fs.existsSync(bootInApkTree)) {
+        const bootText = fs.readFileSync(bootInApkTree, 'utf8');
+        const buildId = path.join(ROOT, 'src', 'renderer', 'midi-build-id.js');
+        let expect = '';
+        if (fs.existsSync(buildId)) {
+            const m = fs.readFileSync(buildId, 'utf8').match(/MIDI_WEB_BUILD_ID = "([^"]+)"/);
+            if (m) expect = m[1];
+        }
+        if (bootText.includes('正在读取系统设备')) {
+            console.error('\n错误：assets 内 boot.js 仍含「正在读取系统设备」——未走完整 mobile:sync 或 sync 失败。');
+            process.exit(1);
+        }
+        if (!bootText.includes('refreshList')) {
+            console.error('\n错误：boot.js 不含 refreshList，Web  bundle 过旧。');
+            process.exit(1);
+        }
+        if (!bootText.includes('layer-v3-trace')) {
+            console.warn('\n警告：boot.js 不含 layer-v3-trace，可能仍是旧 Web 资源。请确认 F6 无报错。');
+        } else if (expect && !bootText.includes(expect.slice(0, 10))) {
+            console.warn(`\n警告：boot.js 与本次 midi-build-id (${expect}) 可能不一致。`);
+        } else {
+            console.log(`\nWeb  bundle OK（boot.js 含 refreshList + layer-v3-trace${expect ? `, build ${expect}` : ''}）`);
+        }
+    }
+
+    const apkBoot = path.join(androidDir, 'app', 'build', 'intermediates', 'assets', 'debug', 'mergeDebugAssets', 'public', 'dist', 'boot.js');
+    if (ok && apkOk && fs.existsSync(apkBoot)) {
+        const inApk = fs.readFileSync(apkBoot, 'utf8');
+        if (inApk.includes('正在读取系统设备') || !inApk.includes('refreshList')) {
+            console.error('\n错误：Gradle 合并进 APK 的 boot.js 与预期不符，请 gradlew clean 后重编。');
+            process.exit(1);
+        }
+    }
+
+    if (!ok) {
+        console.error('\nGradle 构建失败（见上方报错）。未生成新 APK，请勿安装旧的 app-debug.apk。');
+        process.exit(1);
+    }
+
     if (ok && apkOk) {
         console.log(`\nAPK 构建成功：${path.relative(ROOT, apk)}  (${(fs.statSync(apk).size / 1048576).toFixed(1)} MB)`);
-    } else if (!ok && apkOk) {
-        console.warn(
-            '\nGradle 退出码非 0，但 debug APK 已存在（常见于 problems-report.html 被占用）。',
-        );
-        console.log(`APK：${path.relative(ROOT, apk)}  (${(fs.statSync(apk).size / 1048576).toFixed(1)} MB)`);
+        const check16k = path.join(__dirname, 'check-apk-16k.ps1');
+        if (fs.existsSync(check16k)) {
+            console.log('\n校验 16KB 原生库对齐…');
+            const chk = spawnSync('powershell', ['-NoProfile', '-File', check16k, '-Apk', apk], {
+                cwd: ROOT,
+                encoding: 'utf8',
+                shell: true,
+            });
+            if (chk.stdout) process.stdout.write(chk.stdout);
+            if (chk.stderr) process.stderr.write(chk.stderr);
+            if (chk.status !== 0) {
+                console.error('\n16KB 对齐校验失败：请在 Android SDK Manager 安装 NDK 28.0.13004108 后重新 build_android.bat');
+                process.exit(1);
+            }
+        }
     } else if (ok) {
         console.log('\nGradle 构建完成，但未找到预期的 APK 输出。');
-    } else {
         process.exit(1);
     }
 })().catch((e) => {

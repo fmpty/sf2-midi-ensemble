@@ -67,17 +67,35 @@ function copyDirSync(fromDir, toDir) {
     }
 }
 
+function readWebBuildId() {
+    const p = path.join(ROOT, 'src', 'renderer', 'midi-build-id.js');
+    const m = fs.readFileSync(p, 'utf8').match(/MIDI_WEB_BUILD_ID = "([^"]+)"/);
+    return m ? m[1] : String(Date.now());
+}
+
 /** 组装移动端/网页用的 www 目录（Capacitor 的 webDir） */
 function buildWebBundle() {
     const www = path.join(ROOT, 'www');
     const src = path.join(ROOT, 'src', 'renderer');
-    fs.mkdirSync(path.join(www, 'dist'), { recursive: true });
+    const wwwDist = path.join(www, 'dist');
+    if (fs.existsSync(wwwDist)) fs.rmSync(wwwDist, { recursive: true, force: true });
+    fs.mkdirSync(wwwDist, { recursive: true });
     fs.mkdirSync(path.join(www, 'assets', 'soundfonts'), { recursive: true });
-    for (const f of ['index.html', 'styles.css', 'manifest.webmanifest', 'sw.js']) {
+    const buildId = readWebBuildId();
+    const indexSrc = path.join(src, 'index.html');
+    if (fs.existsSync(indexSrc)) {
+        let html = fs.readFileSync(indexSrc, 'utf8');
+        html = html.replace(
+            /src="dist\/boot\.js(?:\?[^"]*)?"/,
+            `src="dist/boot.js?v=${encodeURIComponent(buildId)}"`,
+        );
+        fs.writeFileSync(path.join(www, 'index.html'), html);
+    }
+    for (const f of ['styles.css', 'manifest.webmanifest', 'sw.js']) {
         const from = path.join(src, f);
         if (fs.existsSync(from)) fs.copyFileSync(from, path.join(www, f));
     }
-    copyDirSync(path.join(src, 'dist'), path.join(www, 'dist'));
+    copyDirSync(path.join(src, 'dist'), wwwDist);
     // 音源文件较大，用硬链接减少磁盘占用，失败则复制
     for (const f of fs.readdirSync(SF_DIR)) {
         const from = path.join(SF_DIR, f);
@@ -101,17 +119,20 @@ async function copyProcessor() {
 
 function writeAppVersion() {
     const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-    const out = path.join(ROOT, 'src', 'renderer', 'app-version.js');
+    const buildId = new Date().toISOString().replace(/[:.]/g, '-');
     fs.writeFileSync(
-        out,
+        path.join(ROOT, 'src', 'renderer', 'app-version.js'),
         `/** 构建时从 package.json 写入，勿手改 */\nexport const APP_VERSION = ${JSON.stringify(pkg.version)};\n`,
+    );
+    fs.writeFileSync(
+        path.join(ROOT, 'src', 'renderer', 'midi-build-id.js'),
+        `/** 构建时写入，logcat 里对照是否装到新包 */\nexport const MIDI_WEB_BUILD_ID = ${JSON.stringify(buildId)};\n`,
     );
 }
 
 async function build() {
     ensureSoundfont();
     writeAppVersion();
-    await copyProcessor();
     const options = {
         entryPoints: [path.join(ROOT, 'src', 'renderer', 'boot.js')],
         outdir: OUT_DIR,
@@ -125,13 +146,19 @@ async function build() {
         sourcemap: false,
         legalComments: 'none',
         logLevel: 'info',
+        define: {
+            __MIDI_DEBUG__: 'true',
+        },
     };
     if (watch) {
         const ctx = await esbuild.context(options);
         await ctx.watch();
         console.log('esbuild: 监听中…');
     } else {
+        if (fs.existsSync(OUT_DIR)) fs.rmSync(OUT_DIR, { recursive: true, force: true });
+        fs.mkdirSync(OUT_DIR, { recursive: true });
         const result = await esbuild.build(options);
+        await copyProcessor();
         const outs = result.metafile ? Object.keys(result.metafile.outputs) : [];
         console.log('esbuild: 构建完成 ->', outs.map((p) => path.relative(ROOT, p)).join(', ') || OUT_DIR);
         buildWebBundle();

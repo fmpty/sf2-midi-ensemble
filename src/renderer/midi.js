@@ -3,6 +3,7 @@
  * Chrome/Edge/Electron 的 Web MIDI 原生支持蓝牙 MIDI 设备，
  * 因此本模块可同时接入多个蓝牙/USB MIDI 手柄。
  */
+import { routeAcceptsMidiInput } from './route-midi.js';
 
 const BLE_HINTS = /bluetooth|ble\b|wireless|widi|airturn|cme|xkey|widi|bud|midi\+|le-|_le\b/i;
 
@@ -24,6 +25,7 @@ export class MidiHub {
     }
 
     async connect(options = {}) {
+        void options;
         if (!this.available) throw new Error('当前运行环境不支持 Web MIDI API');
         const force = options.force === true;
         if (this.access && !force) {
@@ -92,7 +94,7 @@ export class MidiHub {
             list.push(dev);
         }
         this.devices = list;
-        this.onDevices(list);
+        this.onDevices(list, { rawNative: list });
     }
 
     bind(input) {
@@ -124,7 +126,7 @@ export class MidiHub {
  * Web MIDI（桌面浏览器 / Android Chrome）与原生插件（Android / iOS）共用该逻辑。
  */
 export function routeMidiMessage(engine, route, data) {
-    if (!route || !route.enabled || !engine.started) return null;
+    if (!route || !routeAcceptsMidiInput(route) || !engine.started) return null;
     const status = data[0];
     if (status >= 0xf0) {
         if (status >= 0xf8) engine.sendMessage(data, 0); // 实时消息直接转发
@@ -137,8 +139,10 @@ export function routeMidiMessage(engine, route, data) {
     if (type === 0x90 || type === 0x80) {
         const note = data[1];
         const vel = type === 0x80 ? 0 : transformVelocity(data[2], route);
-        if (vel > 0) engine.noteOn(route.channel, note, vel);
-        else engine.noteOff(route.channel, note);
+        if (vel > 0) {
+            engine.noteOff(route.channel, note);
+            engine.noteOn(route.channel, note, vel);
+        } else engine.noteOff(route.channel, note);
         return { note, velocity: vel, on: vel > 0 };
     }
     if (type === 0xb0 || type === 0xa0 || type === 0xe0) {

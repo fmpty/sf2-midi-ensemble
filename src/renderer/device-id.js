@@ -31,19 +31,29 @@ export function isMidiNamedDevice(dev) {
     return /midi/i.test(String(dev?.name || ''));
 }
 
+/** Android 系统占位 MIDI 口（英文管理/虚拟名），非真实手柄 */
+export function isGenericMidiPlaceholderName(name) {
+    const n = String(name || '').trim().toLowerCase();
+    if (!n) return true;
+    if (n === 'midi' || n === 'ble midi' || n === 'bluetooth midi') return true;
+    if (n.includes('android') && n.includes('bluetooth') && n.includes('midi')) return true;
+    return /^midi\s*device\s*\d*$/.test(n);
+}
+
 export function isBluetoothMidiEntry(dev) {
     const id = String(dev?.id || '');
     const type = String(dev?.type || '').toLowerCase();
     return type === 'bluetooth' || id.startsWith('bt#') || !!dev?.guessBluetooth;
 }
 
-/** 系统已识别或正在连接中的 MIDI 设备（含端口尚未就绪） */
+/** 在线：Android/iOS 看 portOpen；Web MIDI 看 state/connection */
 export function isMidiDeviceOnline(dev) {
-    if (dev.connected === false) return false;
-    if (dev.connection === 'open') return true;
-    if (dev.state === 'connected') return true;
+    if (dev.portOpen === true) return true;
+    if (dev.statusCode === 3) return true;
     if (dev.state === 'disconnected') return false;
-    return true;
+    if (dev.state === 'connected') return true;
+    if (dev.connection === 'open') return true;
+    return false;
 }
 
 /**
@@ -66,6 +76,7 @@ export function pickPreferredDevice(a, b) {
         if (isMidiDeviceOnline(d)) s += 8;
         if (String(d.id).startsWith('bt#')) s += 4;
         if (d.mac) s += 2;
+        if (isGenericMidiPlaceholderName(d.name)) s -= 16;
         s += Math.min(4, (d.name || '').length / 20);
         return s;
     };
