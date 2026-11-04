@@ -31,6 +31,7 @@ import {
     downloadMidiFile,
     midiFileBase64,
     toMidiBytes,
+    captureRouteProgram,
     recordingElapsedMs,
     playbackElapsedMs,
     performanceDurationMs,
@@ -172,6 +173,7 @@ function applyRoute(route) {
     route.muted = effectiveMuted(route);
     engine.applyRoute(route);
     pushRoutesToNative();
+    captureRouteProgram(route);
 }
 
 /** 原生合成时把路由表下发给原生层，MIDI 插件据此直接发声（不绕 WebView） */

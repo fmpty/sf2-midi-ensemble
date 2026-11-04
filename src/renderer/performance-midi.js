@@ -15,6 +15,7 @@ let seq = 0;
 /** @type {object[]} */
 let events = [];
 const held = new Set();
+const lastProgram = new Map();
 let playTimer = 0;
 let playNotes = [];
 let playGen = 0;
@@ -131,9 +132,33 @@ export function captureNativePlayed(route, data) {
     }
 }
 
+function rememberProgram(route) {
+    const ch = route.channel | 0;
+    const program = route.isDrum ? (route.drumProgram | 0) : (route.program | 0);
+    const sig = `${route.isDrum ? 1 : 0}:${route.bankMSB & 127}:${route.bankLSB & 127}:${program & 127}`;
+    return { ch, program: program & 127, sig };
+}
+
+function writeProgram(route, ms, live) {
+    const { ch, program } = rememberProgram(route);
+    push({ ms, live, ch, type: 0xb0, a: 0, b: route.bankMSB & 127 });
+    push({ ms, live, ch, type: 0xb0, a: 32, b: route.bankLSB & 127 });
+    push({ ms, live, ch, type: 0xc0, a: program, b: 0, drum: !!route.isDrum });
+}
+
+export function captureRouteProgram(route) {
+    if (!shouldCapture() || !route || route.enabled === false) return;
+    if (route.kind !== 'midi' && route.kind !== 'virtual') return;
+    const { ch, sig } = rememberProgram(route);
+    if (lastProgram.get(ch) === sig) return;
+    lastProgram.set(ch, sig);
+    writeProgram(route, nowMs(), true);
+}
+
 export function startRecording(routes) {
     events = [];
     held.clear();
+    lastProgram.clear();
     seq = 0;
     startedAt = performance.now();
     capturing = true;
@@ -144,10 +169,8 @@ export function startRecording(routes) {
         const ch = r.channel | 0;
         if (seen.has(ch)) continue;
         seen.add(ch);
-        const program = r.isDrum ? (r.drumProgram | 0) : (r.program | 0);
-        push({ ms: 0, live: false, ch, type: 0xb0, a: 0, b: r.bankMSB & 127 });
-        push({ ms: 0, live: false, ch, type: 0xb0, a: 32, b: r.bankLSB & 127 });
-        push({ ms: 0, live: false, ch, type: 0xc0, a: program & 127, b: 0, drum: !!r.isDrum });
+        lastProgram.set(ch, rememberProgram(r).sig);
+        writeProgram(r, 0, false);
     }
 }
 
