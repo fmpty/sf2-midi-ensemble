@@ -2,14 +2,15 @@
  * 漏抬键 / 丢 Note Off 兜底：在「认为没有按键按下」或长时间无 MIDI 时自动 stopAll。
  */
 
-const LEAK_DEBOUNCE_MS = 500;
+/** 无按键记录但仍有发声：持续这么久才静音 */
+const EMPTY_STILL_SOUNDING_MS = 8000;
 /** 最后一次 Note On/Off 后仍持续发声则清掉（长按单音会受限，可改大） */
 const IDLE_CUT_MS = 8000;
 
 const active = new Set();
 let lastNoteAt = 0;
 let intervalId = 0;
-let leakTimer = 0;
+let emptySince = 0;
 
 function key(ch, note) {
     return `${ch | 0}:${note | 0}`;
@@ -75,8 +76,9 @@ export function installNoteLeakGuard(engine, log) {
             await engine.refreshStatus();
         }
         const voices = engine.voiceCount || 0;
-        if (voices <= 0) {
-            clearTracking();
+        if (voices <= 0 || active.size > 0) {
+            emptySince = 0;
+            if (voices <= 0) clearTracking();
             return;
         }
 
@@ -84,22 +86,18 @@ export function installNoteLeakGuard(engine, log) {
         if (idle >= IDLE_CUT_MS) {
             origStop();
             clearTracking();
+            emptySince = 0;
             lastNoteAt = Date.now();
             log?.('长时间无 MIDI 活动，已自动清除残留发声');
             return;
         }
 
-        if (active.size === 0) {
-            clearTimeout(leakTimer);
-            leakTimer = setTimeout(() => {
-                if (!engine.started) return;
-                const v = engine.voiceCount || 0;
-                if (v > 0 && active.size === 0) {
-                    origStop();
-                    log?.('检测到无按键记录仍在发声，已自动静音');
-                    lastNoteAt = Date.now();
-                }
-            }, LEAK_DEBOUNCE_MS);
+        if (!emptySince) emptySince = Date.now();
+        if (Date.now() - emptySince >= EMPTY_STILL_SOUNDING_MS) {
+            origStop();
+            clearTracking();
+            emptySince = 0;
+            lastNoteAt = Date.now();
         }
     };
 

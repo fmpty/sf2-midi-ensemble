@@ -244,7 +244,6 @@ export class NativeSynthEngine {
         const list = routes.map((r) => ({
             deviceId: r.deviceId,
             mac: r.deviceMac || '',
-            mac: r.deviceMac || '',
             channel: clampCh(r.channel),
             transpose: r.transpose,
             velocityGain: r.velocityGain,

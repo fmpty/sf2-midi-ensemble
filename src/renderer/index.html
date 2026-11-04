@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; media-src *;" />
-    <title>SF2 MIDI Ensemble · 多手柄合奏器</title>
+    <title>SF2 MIDI Ensemble · MIDI 合奏器</title>
     <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -20,7 +20,7 @@
         <div class="overlay-box">
             <div class="overlay-logo">♫</div>
             <h1>SF2 MIDI Ensemble</h1>
-            <p class="overlay-sub">内置 SoundFont 音源 · 多只 MIDI 手柄同时演奏多个乐器</p>
+            <p class="overlay-sub">内置 SoundFont 音源 · 多台 MIDI 控制器同时演奏</p>
             <button id="btn-start" class="primary">启动音频引擎</button>
             <p class="tip">浏览器策略要求由用户手势启动音频。启动后会自动载入内置音源并扫描 MIDI 设备。</p>
         </div>
@@ -45,7 +45,7 @@
 
     <nav class="tabs" id="tabs">
         <button class="tab active" data-tab="play"><span class="ico">🎹</span><span class="txt">演奏</span></button>
-        <button class="tab" data-tab="devices"><span class="ico">🎛</span><span class="txt">手柄</span><i id="dev-count" class="badge"></i></button>
+        <button class="tab" data-tab="devices"><span class="ico">🎛</span><span class="txt">控制器</span><i id="dev-count" class="badge"></i></button>
         <button class="tab" data-tab="sound"><span class="ico">📦</span><span class="txt">音源</span></button>
         <button class="tab" data-tab="more"><span class="ico">⚙️</span><span class="txt">设置</span></button>
     </nav>
@@ -70,8 +70,8 @@
         <section id="pane-devices" class="tab-pane">
             <div id="device-list" class="device-list"></div>
             <div class="device-foot">
-                <button id="btn-rescan" type="button" class="primary scan-btn">刷新手柄列表</button>
-                <p class="hint">先在系统蓝牙中配对名称含 MIDI 的手柄，保持已连接后再点刷新。</p>
+                <button id="btn-rescan" type="button" class="primary scan-btn">刷新设备列表</button>
+                <p class="hint">先在系统蓝牙中配对名称含 MIDI 的控制器，保持已连接后再点刷新。</p>
             </div>
         </section>
 
@@ -93,7 +93,7 @@
                 </div>
                 <div class="row row-toggles">
                     <label class="chk"><input id="low-latency" type="checkbox" checked />低延迟缓冲</label>
-                    <label class="chk"><input id="kbd-toggle" type="checkbox" checked />电脑键盘虚拟手柄</label>
+                    <label class="chk"><input id="kbd-toggle" type="checkbox" checked />电脑键盘演奏</label>
                 </div>
                 <div class="row row-toggles">
                     <button id="btn-reset" class="mini">复位合成器</button>

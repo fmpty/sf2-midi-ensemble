@@ -86,11 +86,14 @@ const dom = {};
 function log(msg, kind = 'info') {
     const box = dom.log;
     if (!box) return;
+    const gap = box.scrollHeight - box.scrollTop - box.clientHeight;
+    const follow = gap < 48;
     const line = document.createElement('div');
     line.className = `log-line log-${kind}`;
     line.textContent = msg;
-    box.prepend(line);
-    while (box.childElementCount > 60) box.lastElementChild.remove();
+    box.appendChild(line);
+    while (box.childElementCount > 200) box.removeChild(box.firstElementChild);
+    if (follow) box.scrollTop = box.scrollHeight;
 }
 
 function defaultRoute(key, name, kind, channel) {
@@ -339,6 +342,29 @@ function pruneGhostMidiRoutes(scanMacs, onlineMacs) {
     return changed;
 }
 
+/** 手动刷新：当前扫描里已经不在线的 MIDI 路由从界面去掉（配置仍按 MAC 留着） */
+function dropAbsentMidiRoutes(devices) {
+    const online = (Array.isArray(devices) ? devices : []).filter((dev) => isMidiDeviceOnline(dev));
+    let changed = false;
+    for (const r of Object.values(state.routes)) {
+        if (r.kind !== 'midi') continue;
+        const keep = online.some((dev) => {
+            const id = String(dev.id);
+            const mac = normalizeMac(deviceMac(dev));
+            return isSameMidiRoute(r, routeKeyForDev(dev), id, mac);
+        });
+        if (keep) continue;
+        const mac = normalizeMac(r.deviceMac) || normalizeMac(macFromDeviceId(r.deviceId));
+        if (mac) state.deviceProfiles[mac] = snapshotRouteProfile(r);
+        delete state.routes[r.key];
+        state.order = state.order.filter((k) => k !== r.key);
+        if (state.selected === r.key) state.selected = null;
+        changed = true;
+        log(`已从列表移除：${r.label || r.name}`, 'info');
+    }
+    return changed;
+}
+
 let syncDevicesTimer = 0;
 /** @type {{ list: unknown[], opts: Record<string, unknown> } | null} */
 let syncDevicesPending = null;
@@ -455,10 +481,14 @@ function syncDevices(list, opts = {}) {
             if (m) scanMacs.add(m);
         }
         if (pruneGhostMidiRoutes(scanMacs, onlineMacs)) changed = true;
+        if (pendingOpts.dropAbsent && devices.length > 0 && dropAbsentMidiRoutes(devices)) changed = true;
 
         if (!state.routes[VIRTUAL_KEY]) {
-            state.routes[VIRTUAL_KEY] = defaultRoute(VIRTUAL_KEY, '电脑键盘（虚拟手柄）', 'virtual', pickChannel(null));
+            state.routes[VIRTUAL_KEY] = defaultRoute(VIRTUAL_KEY, '电脑键盘', 'virtual', pickChannel(null));
             state.order.push(VIRTUAL_KEY);
+            changed = true;
+        } else if (state.routes[VIRTUAL_KEY].name === '电脑键盘（虚拟手柄）') {
+            state.routes[VIRTUAL_KEY].name = '电脑键盘';
             changed = true;
         }
         state.routes[VIRTUAL_KEY].online = true;
@@ -578,7 +608,7 @@ function renderDevices() {
                 <div class="row row-toggles">
                     <label class="chk"><input type="checkbox" data-field="muted" ${r.muted ? 'checked' : ''}>静音</label>
                     <label class="chk"><input type="checkbox" data-field="solo" ${r.solo ? 'checked' : ''}>独奏</label>
-                    <label class="chk" title="允许手柄自身切换音色"><input type="checkbox" data-field="allowProgramChange" ${r.allowProgramChange ? 'checked' : ''}>手柄可换音色</label>
+                    <label class="chk" title="允许控制器自己切换音色"><input type="checkbox" data-field="allowProgramChange" ${r.allowProgramChange ? 'checked' : ''}>控制器可换音色</label>
                 </div>
             </div>
             <div class="card-foot">
@@ -589,7 +619,7 @@ function renderDevices() {
         wrap.appendChild(card);
     }
     if (!keys.length) {
-        wrap.innerHTML = '<div class="empty">尚未检测到 MIDI 手柄。请先在系统蓝牙中配对手柄，再点击下方「刷新手柄列表」。</div>';
+        wrap.innerHTML = '<div class="empty">尚未检测到 MIDI 控制器。请先在系统蓝牙中配对，再点击下方「刷新设备列表」。</div>';
     }
     const midiCards = keys.filter((k) => state.routes[k].kind === 'midi').length;
     if (dom.devCount) {
@@ -858,8 +888,10 @@ let pianoBound = false;
 
 function ensureVirtualRoute() {
     if (!state.routes[VIRTUAL_KEY]) {
-        state.routes[VIRTUAL_KEY] = defaultRoute(VIRTUAL_KEY, '电脑键盘（虚拟手柄）', 'virtual', pickChannel(null));
+        state.routes[VIRTUAL_KEY] = defaultRoute(VIRTUAL_KEY, '电脑键盘', 'virtual', pickChannel(null));
         state.order.push(VIRTUAL_KEY);
+    } else if (state.routes[VIRTUAL_KEY].name === '电脑键盘（虚拟手柄）') {
+        state.routes[VIRTUAL_KEY].name = '电脑键盘';
     }
     state.routes[VIRTUAL_KEY].online = true;
 }
@@ -1320,7 +1352,7 @@ function bindTabs() {
     showTab(saved);
 }
 
-const RESCAN_LABEL = '刷新手柄列表';
+const RESCAN_LABEL = '刷新设备列表';
 
 function resetRescanButton() {
     const btn = dom.btnRescan;
@@ -1389,6 +1421,9 @@ function rescanMidiDevices() {
                     const rt = await window.api.midiListDevices();
                     log(`系统 MIDI 输入端口（WinMM）：${rt.length} 个`, rt.length ? 'ok' : 'info');
                 } catch { /* 忽略 */ }
+            }
+            if (!isNativeMidiAvailable()) {
+                syncHubDevices({ dropAbsent: true, immediate: true });
             }
             midiTrace('ui-rescan-click-done');
             logRescanResult();
