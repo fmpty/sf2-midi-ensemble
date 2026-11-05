@@ -542,12 +542,12 @@ public class SynthBridgePlugin extends Plugin {
         if (call.getData().has("bankIndex")) {
             nativeSetChannelBank(ch, call.getInt("bankIndex", 0));
         }
-        if (call.getData().has("bank")) {
-            nativeBankSelect(ch, call.getInt("bank", 0));
-        }
         if (call.getData().has("program")) {
             nativeProgramChange(ch, clamp(call.getInt("program", 0), 0, 127),
                     call.getBoolean("isDrum", false) ? 1 : 0);
+        }
+        if (call.getData().has("bank")) {
+            nativeBankSelect(ch, call.getInt("bank", 0));
         }
         if (call.getData().has("volume")) {
             Double v = call.getDouble("volume", Double.valueOf(1.0d));

@@ -779,10 +779,19 @@ function wireCard(card, route) {
             } else route[field] = input.value;
             if (field === 'isDrum') renderDevices();
             applyAllRoutes();
+            if (field === 'instrument' || field === 'drumProgram' || field === 'isDrum') applyRoute(route);
             saveConfig();
             refreshCardValues(card, route);
         });
         input.addEventListener('change', () => {
+            if (field === 'instrument') applyInstrumentValue(route, input.value);
+            else if (field === 'drumProgram') applyDrumValue(route, input.value);
+            else if (field === 'isDrum') route.isDrum = input.checked;
+            if (field === 'instrument' || field === 'drumProgram' || field === 'isDrum') {
+                applyRoute(route);
+                saveConfig();
+                refreshCardValues(card, route);
+            }
             if (field === 'isDrum') renderDevices();
         });
     });

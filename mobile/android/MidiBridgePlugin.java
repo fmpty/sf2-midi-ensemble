@@ -510,10 +510,17 @@ public class MidiBridgePlugin extends Plugin {
             return;
         }
         MidiOutputPort port = null;
-        int outputs = info.getOutputPortCount();
-        for (int i = 0; i < outputs; i++) {
-            port = device.openOutputPort(i);
-            if (port != null) break;
+        int outputs = 0;
+        try {
+            outputs = info.getOutputPortCount();
+            for (int i = 0; i < outputs; i++) {
+                port = device.openOutputPort(i);
+                if (port != null) break;
+            }
+        } catch (RuntimeException e) {
+            // 部分机型蓝牙 MIDI 刚打开时服务端 MidiDeviceInfo 仍为空，openOutputPort 会把空指针抛回主线程
+            layerLog("L3-port", "attach fail openOutputPort key=" + key + " " + e.getClass().getSimpleName());
+            port = null;
         }
         if (port == null) {
             layerLog("L3-port", "attach fail no outputPort key=" + key + " outputs=" + outputs);
