@@ -210,7 +210,10 @@ export class NativeMidiHub {
         await Promise.resolve(
             p.addListener('bluetoothPermissionsReady', (ev) => {
                 midiLayerLog('L4-cap', 'bluetoothPermissionsReady', ev || {});
-                if (ev && ev.granted === false) return;
+                if (ev && ev.granted === false) {
+                    this.onError(new Error('蓝牙权限未授予，请在系统设置里允许附近的设备'));
+                    return;
+                }
                 this.rescan({ quick: true }).catch((e) => this.onError(e));
             }),
         ).catch(() => {});

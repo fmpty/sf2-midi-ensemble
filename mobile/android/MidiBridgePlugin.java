@@ -1,7 +1,13 @@
 package com.sf2ensemble.midi;
 
 import android.Manifest;
+import android.app.Activity;
 import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothGatt;
+import android.bluetooth.BluetoothGattCallback;
+import android.bluetooth.BluetoothGattCharacteristic;
+import android.bluetooth.BluetoothGattDescriptor;
+import android.bluetooth.BluetoothGattService;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
 import android.bluetooth.le.BluetoothLeScanner;
@@ -60,15 +66,21 @@ import java.util.concurrent.atomic.AtomicBoolean;
                         alias = "bluetooth",
                         strings = {
                                 Manifest.permission.BLUETOOTH_SCAN,
-                                Manifest.permission.BLUETOOTH_CONNECT,
-                                Manifest.permission.ACCESS_FINE_LOCATION
+                                Manifest.permission.BLUETOOTH_CONNECT
                         }
+                ),
+                @Permission(
+                        alias = "location",
+                        strings = { Manifest.permission.ACCESS_FINE_LOCATION }
                 )
         }
 )
 public class MidiBridgePlugin extends Plugin {
 
     private static final String MIDI_SERVICE_UUID = "03B80E5A-EDE8-4B33-A751-6CE34EC4C700";
+    private static final UUID MIDI_SERVICE = UUID.fromString(MIDI_SERVICE_UUID);
+    private static final UUID MIDI_CHAR = UUID.fromString("7772E5DB-3868-4112-A1A9-F2669D106BF3");
+    private static final UUID CLIENT_CONFIG = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb");
     private static final long SCAN_MS = 8000L;
     private static final String LAYER_LOG = "MidiBridgeLayer";
 
@@ -91,6 +103,15 @@ public class MidiBridgePlugin extends Plugin {
     private boolean btReceiverRegistered;
     /** 防止 openAll 与 onDeviceAdded 并发重复 openDevice（部分 ROM 会抛 NPE） */
     private final Set<String> opening = new HashSet<>();
+    /** 平板上 openBluetoothDevice 回调时服务端设备信息常尚未就绪，需延迟再开端口 */
+    private final Map<String, Integer> portAttempt = new LinkedHashMap<>();
+    private static final int[] PORT_RETRY_MS = {250, 600, 1200, 2000};
+    /** 系统 openOutputPort 在这块平板上会失败，改由 GATT 收 BLE-MIDI */
+    private final Map<String, BluetoothGatt> gattSessions = new LinkedHashMap<>();
+    private final Set<String> gattLive = new HashSet<>();
+    private final Set<String> gattPending = new HashSet<>();
+    private final Map<String, Integer> gattRetry = new LinkedHashMap<>();
+    private final Set<String> systemOpenTried = new HashSet<>();
 
     @Override
     public void load() {
@@ -237,6 +258,16 @@ public class MidiBridgePlugin extends Plugin {
         emitDevices(norm);
     }
 
+    private MidiDeviceInfo findMidiInfoByMac(String mac) {
+        if (mac == null || mac.isEmpty() || midiManager == null) return null;
+        MidiDeviceInfo[] infos = midiManager.getDevices();
+        if (infos == null) return null;
+        for (MidiDeviceInfo info : infos) {
+            if (mac.equalsIgnoreCase(macFromMidiInfo(info))) return info;
+        }
+        return null;
+    }
+
     private String macFromMidiInfo(MidiDeviceInfo info) {
         if (info == null || info.getType() != MidiDeviceInfo.TYPE_BLUETOOTH) return "";
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return "";
@@ -271,7 +302,7 @@ public class MidiBridgePlugin extends Plugin {
         for (JSObject m : meta.values()) {
             if (m == null) continue;
             String id = m.optString("id", "");
-            boolean live = opened.containsKey(id);
+            boolean live = opened.containsKey(id) || gattLive.contains(id);
             m.put("connected", live);
             if (!live && !id.startsWith("bt#")) {
                 String mac = m.optString("mac", "").toUpperCase(Locale.US);
@@ -322,7 +353,8 @@ public class MidiBridgePlugin extends Plugin {
         if (macNorm == null || macNorm.isEmpty()) return false;
         for (JSObject m : new ArrayList<>(meta.values())) {
             if (!macNorm.equalsIgnoreCase(m.optString("mac", ""))) continue;
-            if (opened.containsKey(m.optString("id", ""))) return true;
+            String id = m.optString("id", "");
+            if (opened.containsKey(id) || gattLive.contains(id)) return true;
         }
         return false;
     }
@@ -332,7 +364,8 @@ public class MidiBridgePlugin extends Plugin {
         if (macNorm == null || macNorm.isEmpty()) return;
         for (String k : new ArrayList<>(meta.keySet())) {
             if (k.equals(keepKey)) continue;
-            if (opened.containsKey(k) || opening.contains(k)) continue;
+            if (opened.containsKey(k) || opening.contains(k) || gattLive.contains(k)
+                    || gattSessions.containsKey(k) || gattPending.contains(k) || gattRetry.containsKey(k)) continue;
             JSObject m = meta.get(k);
             if (m == null) continue;
             if (!macNorm.equalsIgnoreCase(m.optString("mac", ""))) continue;
@@ -413,6 +446,7 @@ public class MidiBridgePlugin extends Plugin {
                 return;
             }
         }
+        systemOpenTried.add(key);
         layerLog("L3-open", "openInfo start key=" + key + " name=" + name);
         if (name == null) name = "MIDI 设备 " + info.getId();
         String manufacturer = info.getProperties().getString(MidiDeviceInfo.PROPERTY_MANUFACTURER);
@@ -459,7 +493,8 @@ public class MidiBridgePlugin extends Plugin {
     private void openBluetooth(BluetoothDevice dev, String addr) {
         if (midiManager == null) return;
         final String key = "bt#" + addr.replace(":", "").toUpperCase(Locale.US);
-        if (opened.containsKey(key)) return;
+        if (opened.containsKey(key) || gattLive.contains(key) || gattSessions.containsKey(key)
+                || gattPending.contains(key) || gattRetry.containsKey(key)) return;
         if (opening.contains(key)) return;
         if (meta.containsKey(key) && !opened.containsKey(key)) meta.remove(key);
         layerLog("L3-open", "openBluetooth start key=" + key);
@@ -497,66 +532,289 @@ public class MidiBridgePlugin extends Plugin {
 
     /** 打开设备的输出端口（设备 → 主机），并挂上接收器 */
     private void attachOutputPort(final String key, MidiDevice device) {
-        if (device == null) return;
-        MidiDeviceInfo info = device.getInfo();
-        if (info == null) {
-            layerLog("L3-port", "attach fail no info key=" + key);
-            try {
-                device.close();
-            } catch (Exception ignored) {
-            }
-            JSObject m = meta.get(key);
-            if (m != null) m.put("connected", false);
-            return;
-        }
+        attachOutputPort(key, device, 0);
+    }
+
+    private void attachOutputPort(final String key, MidiDevice device, int attempt) {
+        if (device == null || opened.containsKey(key)) return;
+        opening.add(key);
         MidiOutputPort port = null;
         int outputs = 0;
+        String err = null;
         try {
-            outputs = info.getOutputPortCount();
-            for (int i = 0; i < outputs; i++) {
-                port = device.openOutputPort(i);
-                if (port != null) break;
+            MidiDeviceInfo info = device.getInfo();
+            if (info != null) {
+                outputs = info.getOutputPortCount();
+                for (int i = 0; i < outputs; i++) {
+                    port = device.openOutputPort(i);
+                    if (port != null) break;
+                }
+            } else {
+                err = "no-info";
             }
         } catch (RuntimeException e) {
-            // 部分机型蓝牙 MIDI 刚打开时服务端 MidiDeviceInfo 仍为空，openOutputPort 会把空指针抛回主线程
-            layerLog("L3-port", "attach fail openOutputPort key=" + key + " " + e.getClass().getSimpleName());
+            // 部分平板蓝牙 MIDI 刚打开时，服务端 MidiDeviceInfo 仍为空，openOutputPort 会把空指针抛回主线程
+            err = e.getClass().getSimpleName();
             port = null;
         }
         if (port == null) {
-            layerLog("L3-port", "attach fail no outputPort key=" + key + " outputs=" + outputs);
+            if (attempt < PORT_RETRY_MS.length) {
+                int delay = PORT_RETRY_MS[attempt];
+                int next = attempt + 1;
+                portAttempt.put(key, next);
+                layerLog("L3-port", "attach retry key=" + key + " in " + delay + "ms attempt=" + next
+                        + (err != null ? " err=" + err : " outputs=" + outputs));
+                mainHandler.postDelayed(() -> {
+                    Integer cur = portAttempt.get(key);
+                    if (cur == null || cur != next || opened.containsKey(key)) return;
+                    attachOutputPort(key, device, next);
+                }, delay);
+                return;
+            }
+            portAttempt.remove(key);
+            opening.remove(key);
+            layerLog("L3-port", "attach give up key=" + key + (err != null ? " err=" + err : " outputs=" + outputs));
             try {
                 device.close();
             } catch (Exception ignored) {
             }
+            String mac = "";
             JSObject m = meta.get(key);
-            if (m != null) m.put("connected", false);
+            if (m != null) {
+                m.put("connected", false);
+                mac = m.optString("mac", "");
+            }
+            MidiDeviceInfo listed = findMidiInfoByMac(mac);
+            if (listed != null && !systemOpenTried.contains(key)) {
+                layerLog("L3-port", "attach fallback openDevice mac=" + mac);
+                openInfo(listed);
+            } else if ("bluetooth".equals(m != null ? m.optString("type", "") : "")) {
+                scheduleGattFallback(key);
+            }
+            emitDevices();
             return;
         }
+        portAttempt.remove(key);
+        opening.remove(key);
         layerLog("L3-port", "attach OK key=" + key + " mac=" + (meta.get(key) != null ? meta.get(key).optString("mac", "") : ""));
         opened.put(key, device);
         ports.put(key, port);
+        closeGatt(key);
         port.connect(new MidiReceiver() {
             @Override
             public void onSend(byte[] msg, int offset, int count, long timestamp) {
-                // 原生合成可用时直接在这里发声，避免绕 WebView（显著降低延迟）
-                boolean played = com.sf2ensemble.synth.SynthBridgePlugin.deliver(key, msg, offset, count);
-                JSArray arr = new JSArray();
-                for (int i = offset; i < offset + count && i < msg.length; i++) {
-                    arr.put(msg[i] & 0xff);
-                }
-                JSObject payload = new JSObject();
-                payload.put("id", key);
-                payload.put("data", arr);
-                payload.put("played", played);
-                JSObject m = meta.get(key);
-                if (m != null) {
-                    String mac = m.optString("mac", "");
-                    if (!mac.isEmpty()) payload.put("mac", mac);
-                }
-                notifyListeners("midiMessage", payload);
+                dispatchMidi(key, msg, offset, count);
             }
         });
         mainHandler.post(MidiBridgePlugin.this::emitDevices);
+    }
+
+    private void dispatchMidi(String key, byte[] msg, int offset, int count) {
+        boolean played = com.sf2ensemble.synth.SynthBridgePlugin.deliver(key, msg, offset, count);
+        JSArray arr = new JSArray();
+        int end = Math.min(msg.length, offset + count);
+        for (int i = Math.max(0, offset); i < end; i++) arr.put(msg[i] & 0xff);
+        JSObject payload = new JSObject();
+        payload.put("id", key);
+        payload.put("data", arr);
+        payload.put("played", played);
+        JSObject row = meta.get(key);
+        if (row != null) {
+            String mac = row.optString("mac", "");
+            if (!mac.isEmpty()) payload.put("mac", mac);
+        }
+        notifyListeners("midiMessage", payload);
+    }
+
+    /** 系统 MIDI 端口打不开时，直接订 BLE-MIDI 特征。同一条连接等系统先松开。 */
+    private void scheduleGattFallback(String key) {
+        if (opened.containsKey(key) || gattLive.contains(key) || gattSessions.containsKey(key) || gattPending.contains(key)) {
+            return;
+        }
+        gattPending.add(key);
+        layerLog("L3-port", "gatt fallback scheduled key=" + key);
+        mainHandler.postDelayed(() -> {
+            gattPending.remove(key);
+            if (opened.containsKey(key) || gattSessions.containsKey(key)) return;
+            startBleMidiFallback(key);
+        }, 400);
+    }
+
+    private BluetoothDevice bondedDeviceByMac(String mac) {
+        if (mac == null || mac.isEmpty() || !hasBluetoothPermission()) return null;
+        Context ctx = getContext();
+        if (ctx == null) return null;
+        BluetoothManager bm = (BluetoothManager) ctx.getSystemService(Context.BLUETOOTH_SERVICE);
+        if (bm == null || bm.getAdapter() == null) return null;
+        try {
+            Set<BluetoothDevice> bonded = bm.getAdapter().getBondedDevices();
+            if (bonded == null) return null;
+            for (BluetoothDevice dev : bonded) {
+                if (mac.equalsIgnoreCase(macFromAddr(dev.getAddress()))) return dev;
+            }
+        } catch (SecurityException ignored) {
+        }
+        return null;
+    }
+
+    private void startBleMidiFallback(String key) {
+        if (opened.containsKey(key) || gattSessions.containsKey(key)) return;
+        JSObject row = meta.get(key);
+        if (row == null) {
+            layerLog("L3-port", "gatt fallback no meta key=" + key);
+            return;
+        }
+        BluetoothDevice dev = bondedDeviceByMac(row.optString("mac", ""));
+        Context ctx = getContext();
+        if (dev == null || ctx == null) {
+            layerLog("L3-port", "gatt fallback no device key=" + key);
+            return;
+        }
+        layerLog("L3-port", "gatt fallback start key=" + key);
+        try {
+            BluetoothGatt gatt = dev.connectGatt(ctx, false, new BluetoothGattCallback() {
+                @Override
+                public void onConnectionStateChange(BluetoothGatt g, int status, int newState) {
+                    mainHandler.post(() -> onGattState(key, g, status, newState));
+                }
+
+                @Override
+                public void onServicesDiscovered(BluetoothGatt g, int status) {
+                    mainHandler.post(() -> enableMidiNotify(key, g, status));
+                }
+
+                @Override
+                public void onCharacteristicChanged(BluetoothGatt g, BluetoothGattCharacteristic ch) {
+                    byte[] value = ch.getValue();
+                    if (value != null && value.length > 0) onBleMidiPacket(key, value);
+                }
+            }, BluetoothDevice.TRANSPORT_LE);
+            if (gatt != null) gattSessions.put(key, gatt);
+        } catch (SecurityException e) {
+            layerLog("L3-port", "gatt security key=" + key);
+        }
+    }
+
+    private void onGattState(String key, BluetoothGatt g, int status, int newState) {
+        if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+            layerLog("L3-port", "gatt connected key=" + key);
+            try {
+                g.discoverServices();
+            } catch (SecurityException e) {
+                layerLog("L3-port", "gatt discover security key=" + key);
+            }
+            return;
+        }
+        if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+            boolean wasLive = gattLive.contains(key);
+            layerLog("L3-port", "gatt disconnected key=" + key + " status=" + status);
+            gattLive.remove(key);
+            if (gattSessions.get(key) == g) gattSessions.remove(key);
+            try {
+                g.close();
+            } catch (Exception ignored) {
+            }
+            JSObject row = meta.get(key);
+            if (row != null) row.put("connected", false);
+            emitDevices();
+            if (!wasLive && meta.containsKey(key)) {
+                int n = gattRetry.getOrDefault(key, 0);
+                if (n < 2) {
+                    gattRetry.put(key, n + 1);
+                    layerLog("L3-port", "gatt retry key=" + key + " n=" + (n + 1));
+                    mainHandler.postDelayed(() -> startBleMidiFallback(key), 800);
+                } else {
+                    gattRetry.remove(key);
+                }
+            }
+        }
+    }
+
+    private void enableMidiNotify(String key, BluetoothGatt g, int status) {
+        if (status != BluetoothGatt.GATT_SUCCESS) {
+            layerLog("L3-port", "gatt services status=" + status + " key=" + key);
+            return;
+        }
+        BluetoothGattService service = g.getService(MIDI_SERVICE);
+        BluetoothGattCharacteristic ch = service == null ? null : service.getCharacteristic(MIDI_CHAR);
+        if (ch == null) {
+            layerLog("L3-port", "gatt no midi char key=" + key);
+            return;
+        }
+        try {
+            g.setCharacteristicNotification(ch, true);
+            BluetoothGattDescriptor desc = ch.getDescriptor(CLIENT_CONFIG);
+            if (desc != null) {
+                desc.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE);
+                g.writeDescriptor(desc);
+            }
+        } catch (SecurityException e) {
+            layerLog("L3-port", "gatt notify security key=" + key);
+            return;
+        }
+        gattLive.add(key);
+        gattRetry.remove(key);
+        JSObject row = meta.get(key);
+        if (row != null) row.put("connected", true);
+        layerLog("L3-port", "gatt notify on key=" + key);
+        emitDevices();
+    }
+
+    private void onBleMidiPacket(String key, byte[] data) {
+        if (data.length < 2) return;
+        int i = 1;
+        int running = 0;
+        while (i < data.length) {
+            if ((data[i] & 0x80) == 0) break;
+            i++;
+            if (i >= data.length) break;
+            int b = data[i] & 0xff;
+            if ((b & 0x80) != 0) {
+                if (b == 0xF0) {
+                    i++;
+                    while (i < data.length && (data[i] & 0xff) != 0xF7) i++;
+                    if (i < data.length) i++;
+                    running = 0;
+                    continue;
+                }
+                running = b;
+                i++;
+            }
+            int need = midiDataLen(running);
+            if (need < 0 || i + need > data.length) break;
+            byte[] msg = new byte[1 + need];
+            msg[0] = (byte) running;
+            System.arraycopy(data, i, msg, 1, need);
+            i += need;
+            dispatchMidi(key, msg, 0, msg.length);
+            if (running >= 0xF0) running = 0;
+        }
+    }
+
+    private static int midiDataLen(int status) {
+        if (status < 0x80) return -1;
+        int hi = status & 0xF0;
+        if (hi == 0xC0 || hi == 0xD0) return 1;
+        if (hi == 0xF0) {
+            if (status == 0xF1 || status == 0xF3) return 1;
+            if (status == 0xF2) return 2;
+            return 0;
+        }
+        return 2;
+    }
+
+    private void closeGatt(String key) {
+        gattLive.remove(key);
+        BluetoothGatt g = gattSessions.remove(key);
+        if (g == null) return;
+        try {
+            g.disconnect();
+        } catch (SecurityException ignored) {
+        }
+        try {
+            g.close();
+        } catch (Exception ignored) {
+        }
     }
 
     private void closeDevice(String key) {
@@ -564,9 +822,14 @@ public class MidiBridgePlugin extends Plugin {
     }
 
     private void closeDevice(String key, String reason) {
-        boolean hadPort = opened.containsKey(key);
+        boolean hadPort = opened.containsKey(key) || gattLive.contains(key);
         layerLog("L3-close", "key=" + key + " reason=" + reason + " hadPort=" + hadPort);
+        portAttempt.remove(key);
         opening.remove(key);
+        systemOpenTried.remove(key);
+        gattPending.remove(key);
+        gattRetry.remove(key);
+        closeGatt(key);
         try {
             MidiOutputPort port = ports.remove(key);
             if (port != null) port.close();
@@ -681,7 +944,7 @@ public class MidiBridgePlugin extends Plugin {
     private boolean putDeviceIfLive(JSObject o, JSArray arr) {
         if (o == null) return false;
         String id = o.optString("id", "");
-        boolean live = opened.containsKey(id);
+        boolean live = opened.containsKey(id) || gattLive.contains(id);
         o.put("connected", live);
         o.put("portOpen", live);
         o.put("statusCode", live ? 3 : 0);
@@ -880,7 +1143,7 @@ public class MidiBridgePlugin extends Plugin {
             return;
         }
         bluetoothPermissionRequestInFlight = true;
-        layerLog("L2-SYS", "request bluetooth permissions missing=" + missing.size());
+        layerLog("L2-SYS", "request bluetooth permissions missing=" + String.join(",", missing));
         PluginCall capCall = callToRejectOnDeny;
         if (capCall == null) {
             synchronized (pendingBluetoothActions) {
@@ -897,7 +1160,8 @@ public class MidiBridgePlugin extends Plugin {
             layerLog("L2-SYS", "bluetooth permission need PluginCall (Capacitor); action queued");
             return;
         }
-        requestPermissionForAlias("bluetooth", capCall, "bluetoothPermsCallback");
+        String alias = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ? "bluetooth" : "location";
+        requestPermissionForAlias(alias, capCall, "bluetoothPermsCallback");
     }
 
     /** Capacitor 8 必须把权限走 requestPermissionForAlias，否则 requestCode 1001 无人接，openAll 永不 resolve */
@@ -909,8 +1173,9 @@ public class MidiBridgePlugin extends Plugin {
             batch = new ArrayList<>(pendingBluetoothActions);
             pendingBluetoothActions.clear();
         }
+        String alias = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ? "bluetooth" : "location";
         boolean granted = hasBluetoothPermission()
-                || getPermissionState("bluetooth") == PermissionState.GRANTED;
+                || getPermissionState(alias) == PermissionState.GRANTED;
         layerLog("L2-SYS", "bluetoothPermsCallback granted=" + granted + " batch=" + batch.size());
         if (granted) {
             for (PendingBluetoothAction pending : batch) {
@@ -928,9 +1193,30 @@ public class MidiBridgePlugin extends Plugin {
                 }
             }
             notifyBluetoothPermissionsReady(false);
+            openBluetoothSettingsIfBlocked();
             if (call != null) {
                 call.reject("蓝牙权限未授予");
             }
+        }
+    }
+
+    /** 系统不再弹出授权框时，直接打开本应用的权限页 */
+    private void openBluetoothSettingsIfBlocked() {
+        Activity act = getActivity();
+        if (act == null) return;
+        boolean canAskAgain = false;
+        for (String p : neededPermissions()) {
+            if (act.checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED) continue;
+            if (act.shouldShowRequestPermissionRationale(p)) canAskAgain = true;
+        }
+        if (canAskAgain) return;
+        layerLog("L2-SYS", "bluetooth permission blocked, open app settings");
+        try {
+            Intent intent = new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+            intent.setData(android.net.Uri.fromParts("package", act.getPackageName(), null));
+            act.startActivity(intent);
+        } catch (RuntimeException e) {
+            Log.w(LAYER_LOG, "open bluetooth settings failed", e);
         }
     }
 
@@ -1086,7 +1372,8 @@ public class MidiBridgePlugin extends Plugin {
 
     private void purgeUnopenedBluetoothMeta() {
         for (String key : new ArrayList<>(meta.keySet())) {
-            if (opened.containsKey(key) || opening.contains(key)) continue;
+            if (opened.containsKey(key) || opening.contains(key) || gattLive.contains(key)
+                    || gattSessions.containsKey(key) || gattPending.contains(key) || gattRetry.containsKey(key)) continue;
             JSObject m = meta.get(key);
             if (m == null) continue;
             if ("bluetooth".equals(m.optString("type", ""))) closeDevice(key, "probe-purge");
@@ -1217,7 +1504,9 @@ public class MidiBridgePlugin extends Plugin {
             if (addr == null) continue;
             if (!isBtLinkConnected(bm, dev)) continue;
             String key = btKeyFromAddr(addr);
-            if (key == null || opened.containsKey(key) || opening.contains(key)) continue;
+            if (key == null || opened.containsKey(key) || opening.contains(key)
+                    || gattLive.contains(key) || gattSessions.containsKey(key)
+                    || gattPending.contains(key) || gattRetry.containsKey(key)) continue;
             String macNorm = macFromAddr(addr);
             if (hasOpenPortForMac(macNorm)) continue;
             if (meta.containsKey(key) && !opened.containsKey(key)) meta.remove(key);
