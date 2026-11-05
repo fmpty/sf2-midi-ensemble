@@ -1473,15 +1473,25 @@ function releasePlayedNote(ch, note) {
     try { engine.noteOff(ch, note); } catch { /* 忽略 */ }
 }
 
+/** 只缩放播放音符的力度，不写总音量，也不写通道音量 */
+let playbackVolume = 100;
+
+function playbackVelocity(value) {
+    const vel = Math.round((value & 127) * playbackVolume / 100);
+    return Math.max(0, Math.min(127, vel));
+}
+
 function performRecordedEvent(e) {
     if (!engine || !engine.started) return;
     const ch = e.ch | 0;
     if (e.type === 0x90 && e.b > 0) {
+        const vel = playbackVelocity(e.b);
         engine.noteOff(ch, e.a);
-        engine.noteOn(ch, e.a, e.b);
+        if (vel > 0) engine.noteOn(ch, e.a, vel);
     } else if (e.type === 0x80 || e.type === 0x90) {
         engine.noteOff(ch, e.a);
     } else if (e.type === 0xb0 && typeof engine.controllerChange === 'function') {
+        if (e.a === 7 || e.a === 11) return;
         engine.controllerChange(ch, e.a, e.b);
     } else if (e.type === 0xe0 && typeof engine.pitchWheel === 'function') {
         engine.pitchWheel(ch, ((e.b & 127) << 7) | (e.a & 127));
@@ -1547,7 +1557,15 @@ function bindPerformance() {
     const btnPlay = document.getElementById('btn-rec-play');
     const btnExport = document.getElementById('btn-rec-export');
     const btnImport = document.getElementById('btn-rec-import');
+    const vol = document.getElementById('rec-volume');
+    const volVal = document.getElementById('rec-volume-val');
     if (!btnRec || !btnPlay || !btnExport || !btnImport) return;
+    if (vol) {
+        vol.addEventListener('input', () => {
+            playbackVolume = Number(vol.value);
+            if (volVal) volVal.textContent = String(playbackVolume);
+        });
+    }
     btnRec.addEventListener('click', () => {
         if (isPlaying()) {
             stopPlayback(releasePlayedNote);
