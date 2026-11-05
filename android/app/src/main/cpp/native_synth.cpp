@@ -13,9 +13,12 @@
 #include <android/log.h>
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <mutex>
 #include <new>
+#include <thread>
 #include <vector>
 #include <algorithm>
 
@@ -65,6 +68,11 @@ std::vector<LoadedBank> g_banks;
 std::vector<int> g_bankOrder;
 int g_channelBank[16] = {0};
 AAudioStream *g_stream = nullptr;
+std::mutex g_streamMu;
+std::atomic<int> g_wantRunning{0};
+std::atomic<int> g_streamBroken{0};
+std::atomic<int> g_restartPosted{0};
+std::atomic<int> g_relaxedNext{0};
 static thread_local std::vector<float> g_mixScratch;
 std::atomic<int> g_sampleRate{48000};
 std::atomic<int> g_framesPerBurst{0};
@@ -280,18 +288,75 @@ aaudio_data_callback_result_t dataCallback(AAudioStream *stream, void *userData,
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 
+bool openStream();
+
+void closeStreamLocked() {
+    if (!g_stream) return;
+    AAudioStream_requestStop(g_stream);
+    AAudioStream_close(g_stream);
+    g_stream = nullptr;
+}
+
+void recoverStreamLocked() {
+    if (!g_wantRunning.load(std::memory_order_acquire)) return;
+    if (g_stream) {
+        const aaudio_stream_state_t st = AAudioStream_getState(g_stream);
+        if (st == AAUDIO_STREAM_STATE_STARTED || st == AAUDIO_STREAM_STATE_STARTING) {
+            g_streamBroken.store(0, std::memory_order_release);
+            return;
+        }
+        if (st == AAUDIO_STREAM_STATE_PAUSED) {
+            if (AAudioStream_requestStart(g_stream) == AAUDIO_OK) {
+                g_streamBroken.store(0, std::memory_order_release);
+                return;
+            }
+        }
+        closeStreamLocked();
+    }
+    g_relaxedNext.store(1, std::memory_order_release);
+    if (openStream()) {
+        g_streamBroken.store(0, std::memory_order_release);
+        LOGI("AAudio 已重开");
+    } else {
+        LOGE("AAudio 重开失败");
+    }
+}
+
+void scheduleStreamRestart() {
+    int expected = 0;
+    if (!g_restartPosted.compare_exchange_strong(expected, 1)) return;
+    std::thread([] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::lock_guard<std::mutex> lock(g_streamMu);
+        g_restartPosted.store(0, std::memory_order_release);
+        recoverStreamLocked();
+    }).detach();
+}
+
 void errorCallback(AAudioStream *stream, void *userData, aaudio_result_t error) {
     (void)stream;
     (void)userData;
     LOGE("AAudio 错误：%d", error);
+    g_streamBroken.store(1, std::memory_order_release);
+    if (g_wantRunning.load(std::memory_order_acquire)) scheduleStreamRestart();
+}
+
+void recoverStreamIfBroken() {
+    if (!g_streamBroken.load(std::memory_order_acquire)) return;
+    if (!g_wantRunning.load(std::memory_order_acquire)) return;
+    std::lock_guard<std::mutex> lock(g_streamMu);
+    recoverStreamLocked();
 }
 
 bool openStream() {
     AAudioStreamBuilder *builder = nullptr;
     if (AAudio_createStreamBuilder(&builder) != AAUDIO_OK || !builder) return false;
 
+    const bool relaxed = g_relaxedNext.exchange(0, std::memory_order_acq_rel) != 0;
     AAudioStreamBuilder_setDirection(builder, AAUDIO_DIRECTION_OUTPUT);
-    AAudioStreamBuilder_setPerformanceMode(builder, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+    AAudioStreamBuilder_setPerformanceMode(builder, relaxed
+            ? AAUDIO_PERFORMANCE_MODE_NONE
+            : AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
     AAudioStreamBuilder_setSharingMode(builder, AAUDIO_SHARING_MODE_SHARED);
     AAudioStreamBuilder_setFormat(builder, AAUDIO_FORMAT_PCM_FLOAT);
     AAudioStreamBuilder_setChannelCount(builder, 2);
@@ -322,7 +387,11 @@ bool openStream() {
         int32_t buf = burst >= 256 ? (burst + burst / 2) : (burst * 2);
         if (buf < burst + 64) buf = burst + 64;
         const int32_t capFrames = (rateHz * 16) / 1000;
-        if (capFrames > burst && buf > capFrames) buf = capFrames;
+        if (!relaxed && capFrames > burst && buf > capFrames) buf = capFrames;
+        if (relaxed) {
+            const int32_t roomy = (rateHz * 48) / 1000;
+            if (buf < roomy) buf = roomy;
+        }
         AAudioStream_setBufferSizeInFrames(stream, buf);
     }
     g_bufferFrames.store(AAudioStream_getBufferSizeInFrames(stream), std::memory_order_relaxed);
@@ -411,15 +480,27 @@ Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeSetChannelBank(JNIEnv *, jcla
 }
 
 JNIEXPORT jboolean JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeStart(JNIEnv *, jclass) {
-    if (g_stream) return JNI_TRUE;
+    std::lock_guard<std::mutex> lock(g_streamMu);
+    g_wantRunning.store(1, std::memory_order_release);
+    if (g_stream) {
+        const aaudio_stream_state_t st = AAudioStream_getState(g_stream);
+        if (st == AAUDIO_STREAM_STATE_STARTED || st == AAUDIO_STREAM_STATE_STARTING) return JNI_TRUE;
+        closeStreamLocked();
+    }
     return openStream() ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeStop(JNIEnv *, jclass) {
-    if (!g_stream) return;
-    AAudioStream_requestStop(g_stream);
-    AAudioStream_close(g_stream);
-    g_stream = nullptr;
+    g_wantRunning.store(0, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(g_streamMu);
+    closeStreamLocked();
+}
+
+JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeRecover(JNIEnv *, jclass) {
+    if (!g_wantRunning.load(std::memory_order_acquire)) return;
+    g_streamBroken.store(1, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(g_streamMu);
+    recoverStreamLocked();
 }
 
 JNIEXPORT jboolean JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeIsRunning(JNIEnv *, jclass) {
@@ -428,6 +509,7 @@ JNIEXPORT jboolean JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeIs
 
 JNIEXPORT void JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeNoteOn(JNIEnv *, jclass, jint ch,
                                                                           jint note, jint vel) {
+    recoverStreamIfBroken();
     MidiEvent e{EV_NOTE_ON, ch & 15, note & 127, vel & 127, 0};
     pushEvent(e);
 }

@@ -2,6 +2,9 @@ package com.sf2ensemble.synth;
 
 import android.app.Activity;
 import android.content.ContentResolver;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
+import android.media.AudioManager;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
@@ -83,6 +86,8 @@ public class SynthBridgePlugin extends Plugin {
     public static native boolean nativeStart();
 
     public static native void nativeStop();
+
+    public static native void nativeRecover();
 
     public static native boolean nativeIsRunning();
 
@@ -431,6 +436,7 @@ public class SynthBridgePlugin extends Plugin {
             call.reject("请先载入音源");
             return;
         }
+        holdPlaybackFocus();
         try {
             boolean ok = nativeStart();
             JSObject res = new JSObject();
@@ -450,6 +456,7 @@ public class SynthBridgePlugin extends Plugin {
     @PluginMethod
     public void stop(PluginCall call) {
         nativeStop();
+        releasePlaybackFocus();
         call.resolve();
     }
 
@@ -691,9 +698,40 @@ public class SynthBridgePlugin extends Plugin {
         return v < lo ? lo : (v > hi ? hi : v);
     }
 
+    private AudioFocusRequest playbackFocus;
+
+    /** 占住播放焦点，避免平板把 AAudio 流掐掉后不再出声 */
+    private void holdPlaybackFocus() {
+        Context ctx = getContext();
+        if (ctx == null) return;
+        AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
+        if (am == null) return;
+        if (playbackFocus == null) {
+            AudioAttributes attrs = new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build();
+            playbackFocus = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                    .setAudioAttributes(attrs)
+                    .setOnAudioFocusChangeListener(change -> {
+                        if (change == AudioManager.AUDIOFOCUS_GAIN && libOk) nativeRecover();
+                    })
+                    .build();
+        }
+        am.requestAudioFocus(playbackFocus);
+    }
+
+    private void releasePlaybackFocus() {
+        Context ctx = getContext();
+        if (ctx == null || playbackFocus == null) return;
+        AudioManager am = (AudioManager) ctx.getSystemService(Context.AUDIO_SERVICE);
+        if (am != null) am.abandonAudioFocusRequest(playbackFocus);
+    }
+
     @Override
     protected void handleOnDestroy() {
         nativeStop();
+        releasePlaybackFocus();
         super.handleOnDestroy();
     }
 }

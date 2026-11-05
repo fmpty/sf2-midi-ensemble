@@ -1625,16 +1625,6 @@ function bindUI() {
     resetRescanButton();
     if (dom.btnOctDown) dom.btnOctDown.addEventListener('click', () => shiftPianoOctave(-1));
     if (dom.btnOctUp) dom.btnOctUp.addEventListener('click', () => shiftPianoOctave(1));
-    dom.btnPanic.addEventListener('click', () => {
-        const wasPlaying = isPlaying();
-        if (wasPlaying) stopPlayback();
-        engine.stopAll();
-        vkb.releaseAll();
-        releaseAllPiano();
-        if (wasPlaying) applyAllRoutes();
-        updateRecUi();
-        log('已停止所有音符', 'info');
-    });
     dom.btnLoadBank.addEventListener('click', async () => {
         const files = await openSoundfont();
         if (!files || !files.length) return;
@@ -1706,7 +1696,7 @@ async function main() {
     installPerformanceCapture(engine);
     const ids = ['btn-start', 'start-overlay', 'status-audio', 'audio-dot', 'master-volume', 'master-volume-val',
         'voice-cap', 'voice-cap-val', 'bank-list', 'bank-count', 'btn-load-bank', 'device-list', 'btn-rescan',
-        'btn-panic', 'btn-reset', 'kbd-toggle', 'piano', 'btn-oct-down', 'btn-oct-up',
+        'btn-reset', 'kbd-toggle', 'piano', 'btn-oct-down', 'btn-oct-up',
         'stat-rate', 'stat-latency',
         'stat-voices', 'log', 'app-version', 'low-latency', 'tabs', 'dev-count'];
     ids.forEach((id) => { dom[camel(id)] = el(id); });
