@@ -21,3 +21,7 @@ assets/soundfonts/*.sf3
 assets/soundfonts/*.sfogg
 assets/soundfonts/*.dls
 assets/soundfonts/manifest.json
+icon_backup_original/*
+splash_backup_original/*
+assets_backup_original/
+ios_backup_original/
