@@ -1,0 +1,20 @@
+{
+  "name": "SF2 MIDI Ensemble",
+  "short_name": "SF2 合奏",
+  "description": "内置 SoundFont · 多路 MIDI 控制器合奏",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0d1117",
+  "theme_color": "#1a2332",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "assets/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

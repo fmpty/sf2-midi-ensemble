@@ -22,7 +22,16 @@ function onBootError(e) {
     }
 }
 
+function registerWebShell() {
+    if (typeof navigator === 'undefined' || !navigator.serviceWorker) return;
+    if (location.protocol === 'file:') return;
+    const cap = typeof window !== 'undefined' ? window.Capacitor : null;
+    if (cap && typeof cap.isNativePlatform === 'function' && cap.isNativePlatform()) return;
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+
 function run() {
+    registerWebShell();
     startApp().catch(onBootError);
 }
 

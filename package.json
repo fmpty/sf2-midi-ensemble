@@ -15,7 +15,11 @@
     "dist": "node scripts/build.js && node scripts/pre-electron-dist.js && node scripts/run-electron-builder.js && node scripts/clean-stale-win-dist.js",
     "mobile:sync": "node scripts/pre-android-build.js && node scripts/build.js && npx cap sync android && node scripts/verify-web-in-android.js && node scripts/sync-native.js",
     "mobile:android": "npm run mobile:sync && node scripts/build-android.js",
-    "mobile:ios": "npm run mobile:sync && npx cap open ios"
+    "mobile:ios": "npm run mobile:sync && npx cap open ios",
+    "web": "node scripts/build.js && node tools/serve.js",
+    "web:serve": "node tools/serve.js",
+    "web:https": "node scripts/build.js && node tools/serve.js --https --lan",
+    "web:watch": "node scripts/build.js --watch"
   },
   "dependencies": {
     "@julusian/midi": "^3.6.1",

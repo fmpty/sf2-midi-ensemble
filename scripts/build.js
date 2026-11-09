@@ -73,11 +73,22 @@ function readWebBuildId() {
     return m ? m[1] : String(Date.now());
 }
 
+/** GitHub Pages 项目站子路径，如 /sf2-midi-ensemble/（由 CI 注入） */
+function pagesBaseHref() {
+    const raw = process.env.GITHUB_PAGES_BASE || '';
+    if (!raw) return '';
+    const t = raw.trim();
+    if (!t || t === '/') return '';
+    const withSlashes = t.startsWith('/') ? t : `/${t}`;
+    return withSlashes.endsWith('/') ? withSlashes : `${withSlashes}/`;
+}
+
 /** 组装移动端/网页用的 www 目录（Capacitor 的 webDir） */
 function buildWebBundle() {
     const www = path.join(ROOT, 'www');
     const src = path.join(ROOT, 'src', 'renderer');
     const wwwDist = path.join(www, 'dist');
+    const baseHref = pagesBaseHref();
     if (fs.existsSync(wwwDist)) fs.rmSync(wwwDist, { recursive: true, force: true });
     fs.mkdirSync(wwwDist, { recursive: true });
     fs.mkdirSync(path.join(www, 'assets', 'soundfonts'), { recursive: true });
@@ -89,13 +100,32 @@ function buildWebBundle() {
             /src="dist\/boot\.js(?:\?[^"]*)?"/,
             `src="dist/boot.js?v=${encodeURIComponent(buildId)}"`,
         );
+        if (baseHref && !/<base\s/i.test(html)) {
+            html = html.replace(/<head>/i, `<head>\n    <base href="${baseHref}" />`);
+        }
         fs.writeFileSync(path.join(www, 'index.html'), html);
     }
     for (const f of ['styles.css', 'manifest.webmanifest', 'sw.js']) {
         const from = path.join(src, f);
         if (fs.existsSync(from)) fs.copyFileSync(from, path.join(www, f));
     }
+    if (baseHref) {
+        const manifestPath = path.join(www, 'manifest.webmanifest');
+        if (fs.existsSync(manifestPath)) {
+            try {
+                const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+                manifest.start_url = baseHref;
+                manifest.scope = baseHref;
+                fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+            } catch { /* 忽略 */ }
+        }
+        console.log(`GitHub Pages base: ${baseHref}`);
+    }
+    fs.writeFileSync(path.join(www, '.nojekyll'), '\n');
     copyDirSync(path.join(src, 'dist'), wwwDist);
+    const iconsFrom = path.join(ROOT, 'assets', 'icons');
+    const iconsTo = path.join(www, 'assets', 'icons');
+    if (fs.existsSync(iconsFrom)) copyDirSync(iconsFrom, iconsTo);
     // 音源文件较大，用硬链接减少磁盘占用，失败则复制
     for (const f of fs.readdirSync(SF_DIR)) {
         const from = path.join(SF_DIR, f);

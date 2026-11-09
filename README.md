@@ -33,7 +33,49 @@ npm run mobile:android   # 自动下载 JDK 21、编译 APK
 npm run mobile:ios       # 同步 Web 资源并打开 Xcode（需 macOS）
 ```
 
-也可直接在浏览器 / PWA 打开（`tools/serve.js` 静态服务），无需安装。
+### Web 版（浏览器 / PWA，不改 Win / Android 安装包逻辑）
+
+```bash
+npm run web          # 构建 www/ 并启动本机静态服务（默认 http://127.0.0.1:8765）
+npm run web:serve    # 仅启动服务（需已 npm run build）
+npm run web:https    # 局域网 HTTPS（手机 Chrome 连 WiFi 访问时需用，含自签证书）
+npm run web:watch    # 监听源码；另开终端 npm run web:serve
+```
+
+- **合成**：WebAudio + spessasynth（与 Electron 回退路径相同，不是 Android 原生 AAudio）。
+- **MIDI**：浏览器 **Web MIDI API**（Windows/macOS/Linux 上 Chrome/Edge 支持 USB 与 BLE-MIDI）。
+- **安全上下文**：`http://localhost` / `127.0.0.1` 可用；手机通过 IP 访问须 **HTTPS**（`npm run web:https`）。
+- **iOS Safari**：无 Web MIDI，仅屏幕键盘 / 虚拟键盘试奏。
+- 静态部署：把构建后的 `www/` 整目录放到任意 HTTPS 静态主机即可。
+
+### 部署到 GitHub Pages
+
+仓库已包含工作流 [`.github/workflows/deploy-github-pages.yml`](.github/workflows/deploy-github-pages.yml)：`push` 到 `main` 后自动 `npm ci` → `npm run build` → 发布 `www/`。
+
+**首次在 GitHub 上架：**
+
+1. 在 [GitHub](https://github.com/new) 创建空仓库（建议与文件夹同名，例如 `sf2-midi-ensemble`）。
+2. 本机登录 GitHub CLI（若尚未登录）：
+   ```bash
+   gh auth login -h github.com
+   ```
+3. 添加远程并推送（保留你现有的内网 remote 亦可，另加 `github`）：
+   ```bash
+   git remote add github https://github.com/<你的用户名>/<仓库名>.git
+   git add -A
+   git commit -m "Add GitHub Pages workflow and web bundle"
+   git push -u github main
+   ```
+4. 打开仓库 **Settings → Pages**，**Build and deployment → Source** 选 **GitHub Actions**（不要选 “Deploy from branch”）。
+5. 等 Actions 跑绿后，访问：**`https://<你的用户名>.github.io/<仓库名>/`**（HTTPS，桌面 Chrome/Edge 可用 Web MIDI）。
+
+本地模拟 Pages 子路径构建：
+
+```bash
+set GITHUB_PAGES_BASE=/sf2-midi-ensemble/
+npm run build
+npm run web:serve
+```
 
 自动化冒烟测试（启动应用、载入内置音源、检查多路同时发声，结果写入 `tools/smoke.log`）：
 

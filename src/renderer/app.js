@@ -1399,6 +1399,8 @@ function logRescanResult() {
         for (const d of hub.devices) log(`  · ${describeDevice(d)} · ${d.state || '?'}`, 'info');
     } else if (isElectron()) {
         log('未发现 MIDI 设备。Windows：确认蓝牙里已连接；若系统有设备但此处仍为空，可安装 KORG BLE-MIDI 驱动或 Microsoft Store 的「MIDIberry」桥接后再刷新', 'warn');
+    } else if (!isElectron() && !isNativeMidiAvailable()) {
+        log('未发现 MIDI 设备。请先在系统蓝牙里配对，再用 Chrome/Edge 打开本页并点「刷新」；局域网访问需 HTTPS（npm run web:https）', 'warn');
     } else {
         log('未发现 MIDI 设备', 'warn');
     }
@@ -1821,6 +1823,12 @@ async function main() {
         if (!info.hasBuiltin) log('未检测到内置音源（assets/soundfonts），启动时可手动载入 SF2', 'warn');
         if (info.desktopMidi) log('Windows 桌面 MIDI：使用主进程端口枚举（Web MIDI 蓝牙常为空时仍可能列出设备）', 'info');
         if (!isElectron()) {
+            const cap = typeof window !== 'undefined' ? window.Capacitor : null;
+            const nativeApp = cap && typeof cap.isNativePlatform === 'function' && cap.isNativePlatform();
+            if (!nativeApp) document.documentElement.classList.add('web-app');
+            if (info.platform === 'browser' || info.platform === 'mobile-browser') {
+                log('Web 版：Chrome/Edge 支持 Web MIDI（含蓝牙）；配置保存在本机浏览器', 'info');
+            }
             if (info.secureContext === false) log('当前非安全上下文（需 HTTPS 或 localhost），Web MIDI 不可用', 'warn');
             if (!info.webMidi) log('当前浏览器不支持 Web MIDI（如 iOS Safari），可使用电脑键盘/屏幕键盘演奏', 'warn');
         }
