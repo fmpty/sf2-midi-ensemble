@@ -55,10 +55,12 @@ npm run web:watch    # 监听源码；另开终端 npm run web:serve
 仓库根目录仍 `private: true`；npm 上的是 **预构建 Web 版 + `sf2-midi-ensemble` 命令**，不含 Electron/Android 源码。
 
 ```bash
+npm config set registry https://registry.npmjs.org/   # 发布须用官方源（勿用 npmmirror）
 npm login
 npm run publish:npm        # 生成 .npm-staging/ 并 dry-run 看包内容
-npm run publish:npm:go     # 实际上传 registry
-# 全局安装后：sf2-midi-ensemble
+npm run publish:npm:go     # 实际上传（包约 29MB，含内置 SF2）
+# 安装：npm install -g sf2-midi-ensemble
+# 使用：sf2-midi-ensemble  →  http://127.0.0.1:8765/
 ```
 
 默认包名 `sf2-midi-ensemble`；若要用 scope：`set NPM_PACKAGE_NAME=@你的用户名/sf2-midi-ensemble` 再执行上述命令。
