@@ -1,0 +1,75 @@
+SF2 MIDI Ensemble Non-Commercial License 1.0
+
+Copyright (c) 2026 SF2 MIDI Ensemble contributors
+Repository: https://github.com/fmpty/sf2-midi-ensemble
+
+=== 许可摘要（中文）===
+
+本项目以「公开源码、非商业使用」方式授权。
+
+允许（非商业）：
+  • 阅读、使用、修改本仓库中的自有源代码
+  • 在遵守本许可的前提下向他人提供源代码或修改版（须附带本文件）
+
+禁止（未经版权人书面同意）：
+  • 任何商业利用，包括收费分发、收费托管/SaaS、捆绑销售、以本软件作为
+    主要卖点的商业推广、向第三方提供有偿演奏/教学服务并依赖本软件计费等
+  • 删除或篡改本许可与版权声明
+
+本许可仅适用于本仓库版权人拥有著作权的代码与文档。第三方依赖与音源数据
+适用各自许可证，见 THIRD_PARTY_NOTICES.md。
+
+软件按「原样」提供，不提供任何明示或暗示担保。
+
+商业合作或商用授权请联系仓库维护者（GitHub: fmpty）。
+
+=== Terms (English) ===
+
+1. Definitions
+
+   "Software" means the source code, documentation, and assets in this
+   repository that are Copyright (c) SF2 MIDI Ensemble contributors,
+   excluding third-party components listed in THIRD_PARTY_NOTICES.md.
+
+   "Non-commercial use" means use that is not primarily intended for or
+   directed toward commercial advantage or monetary compensation.
+
+   "Commercial use" includes, without limitation: selling or licensing the
+   Software or derivative works; offering the Software as part of a paid
+   product or service; using the Software in revenue-generating operations
+   other than de minimis personal trial; or sublicensing for a fee.
+
+2. Grant
+
+   Subject to these terms, you are granted a non-exclusive, worldwide,
+   royalty-free license to use, reproduce, prepare derivative works of,
+   and distribute the Software, solely for non-commercial purposes.
+
+3. Conditions
+
+   You must retain this license and copyright notice in all copies or
+   substantial portions of the Software. You may not impose additional
+   restrictions that contradict this license on the Software you distribute.
+
+4. Commercial use
+
+   Commercial use is not permitted except with prior written permission
+   from the copyright holders.
+
+5. Third-party components
+
+   Third-party libraries and soundfonts bundled or referenced by the Software
+   are governed by their own licenses. Your obligations under those licenses
+   are independent of this license.
+
+6. Disclaimer
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+   THE SOFTWARE.
+
+SPDX-License-Identifier: LicenseRef-Sf2MidiEnsemble-NonCommercial-1.0

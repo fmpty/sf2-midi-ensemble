@@ -1,6 +1,8 @@
 # SF2 MIDI Ensemble
 
-跨平台桌面应用：**内置 / 加载 SoundFont（SF2/SF3/DLS）音源**，同时接入**多个蓝牙 MIDI 手柄**，各手柄独立占用一个 MIDI 通道、独立选择乐器，实现多人同时演奏多个乐器。
+跨平台桌面 / Web / 移动应用：**内置 / 加载 SoundFont（SF2/SF3/DLS）音源**，同时接入**多个蓝牙 MIDI 手柄**，各手柄独立占用一个 MIDI 通道、独立选择乐器，实现多人同时演奏多个乐器。
+
+**许可**：源码公开，**允许非商业**使用、修改与再分发（见仓库根目录 [`LICENSE`](LICENSE)）；**禁止未经许可的商用**。依赖与音源见 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md)。
 
 - 图形/音频栈：Electron（Windows / macOS / Linux）
 - 合成引擎：[spessasynth_lib](https://github.com/spessasus/spessasynth_lib)（基于 AudioWorklet，运行在独立音频线程，支持 SF2/SF3/SFOGG/DLS、GM/GS/XG、多通道、多音源库）
@@ -236,6 +238,11 @@ npm run mobile:ios      # 需在 macOS 上执行（Xcode + CocoaPods）
 
 ## 许可
 
-- 本项目：MIT
-- spessasynth_lib / spessasynth_core：Apache-2.0
-- 内置音源请遵循其各自的授权条款
+| 范围 | 许可 |
+|------|------|
+| **本仓库自有代码与文档** | [SF2 MIDI Ensemble Non-Commercial 1.0](LICENSE) — 公开源码，**可非商业使用/修改/再分发**；**禁止商业使用**（收费产品/服务、商业 SaaS 等） unless 另行书面授权 |
+| **spessasynth_lib / spessasynth_core** | Apache-2.0（允许商用，但须遵守 Apache 条款） |
+| **Electron、Capacitor、其它 npm 依赖** | 各包声明之许可（见 `package-lock.json`） |
+| **内置 GeneralUser 等音源** | 遵循音源作者条款（见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)） |
+
+这不属于 OSI 定义的「宽松开源（如 MIT）」——我们选择的是 **公开 + 非商业** 模式。若需商用合作，请通过 GitHub 联系维护者。

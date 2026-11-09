@@ -5,7 +5,7 @@
   "description": "跨平台 SF2 音源合奏器：内置/加载 SoundFont，同时接入多个蓝牙 MIDI 手柄演奏多个乐器",
   "main": "src/main/main.js",
   "author": "SF2 MIDI Ensemble",
-  "license": "MIT",
+  "license": "LicenseRef-Sf2MidiEnsemble-NonCommercial-1.0",
   "private": true,
   "scripts": {
     "build": "node scripts/build.js",

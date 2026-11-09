@@ -15,6 +15,10 @@ tools/*.log
 *.log
 .DS_Store
 
+# 本机开发配置（勿提交）
+.vscode/remotedev-hosts.json
+tools/.certs/
+
 # 音源由 npm 包（generaluser / freepats）在构建时复制进来，体积大不入仓
 assets/soundfonts/*.sf2
 assets/soundfonts/*.sf3
