@@ -1,7 +1,7 @@
 {
   "name": "sf2-midi-ensemble",
   "productName": "SF2 MIDI Ensemble",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "跨平台 SF2 音源合奏器：内置/加载 SoundFont，同时接入多个蓝牙 MIDI 手柄演奏多个乐器",
   "main": "src/main/main.js",
   "author": "SF2 MIDI Ensemble",

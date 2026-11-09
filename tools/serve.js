@@ -6,7 +6,7 @@ const http = require('node:http');
 const https = require('node:https');
 const fs = require('node:fs');
 const path = require('node:path');
-const { execSync } = require('node:child_process');
+const { execSync, exec } = require('node:child_process');
 
 const ROOT = path.join(__dirname, '..');
 const WWW = path.join(ROOT, 'www');
@@ -154,6 +154,15 @@ function main() {
             }
         }
         console.log('  推荐浏览器：Chrome / Edge（支持 Web MIDI + 蓝牙 BLE-MIDI）');
+        console.log('  **请保持本窗口打开**；关闭后 127.0.0.1 会拒绝连接。');
+        if (process.env.SF2_NO_OPEN !== '1') {
+            const url = loopback;
+            if (process.platform === 'win32') {
+                exec(`start "" "${url}"`, { windowsHide: true }, () => {});
+            } else if (process.platform === 'darwin') {
+                exec(`open "${url}"`, () => {});
+            }
+        }
     });
 }
 

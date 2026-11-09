@@ -44,7 +44,10 @@ function shebangServe() {
     }
 }
 
-execSync('node scripts/build.js', { cwd: ROOT, stdio: 'inherit' });
+// 勿带 GitHub Pages 子路径，否则本地 http://127.0.0.1:8765/ 资源 404
+const buildEnv = { ...process.env };
+delete buildEnv.GITHUB_PAGES_BASE;
+execSync('node scripts/build.js', { cwd: ROOT, stdio: 'inherit', env: buildEnv });
 
 rm(STAGING);
 fs.mkdirSync(STAGING, { recursive: true });
@@ -65,19 +68,32 @@ const readme = `# sf2-midi-ensemble (npm)
 
 ## 安装
 
+若曾装过占位版，请先卸载再装 **1.0.0+**（须带 \`bin\` 与约 30MB 的 \`www\`）：
+
 \`\`\`bash
-npm install -g sf2-midi-ensemble
-# 或
-npx sf2-midi-ensemble
+npm uninstall -g sf2-midi-ensemble
+npm install -g sf2-midi-ensemble@latest --registry=https://registry.npmjs.org/
+\`\`\`
+
+或一次性运行（无需全局安装）：
+
+\`\`\`bash
+npx sf2-midi-ensemble@latest
 \`\`\`
 
 ## 使用
 
 \`\`\`bash
 sf2-midi-ensemble
-# 默认 http://127.0.0.1:8765/
+\`\`\`
+
+会先在本机 **8765** 端口起服务并尝试打开浏览器；**不要关**此命令行窗口。
+
+\`\`\`bash
 sf2-midi-ensemble --lan --https -p 8765
 \`\`\`
+
+找不到命令时，把 \`%AppData%\\npm\` 加入系统 PATH。
 
 源码与桌面/Android 版：https://github.com/fmpty/sf2-midi-ensemble
 `;
