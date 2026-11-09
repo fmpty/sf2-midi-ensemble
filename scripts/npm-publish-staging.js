@@ -104,8 +104,12 @@ const stagingPkg = {
 };
 
 fs.writeFileSync(path.join(STAGING, 'package.json'), JSON.stringify(stagingPkg, null, 2) + '\n');
+// 覆盖仓库根 .npmrc 的 npmmirror，否则 npm publish 会打到镜像且 ENEEDAUTH
+fs.writeFileSync(path.join(STAGING, '.npmrc'), 'registry=https://registry.npmjs.org/\n');
 
 const packed = execSync('npm pack --dry-run', { cwd: STAGING, encoding: 'utf8' });
 console.log(packed);
 console.log(`\n就绪：${STAGING}`);
-console.log('发布：npm publish .npm-staging --access public  （scoped 包名时须 --access public）');
+console.log(
+    '发布：npm publish .npm-staging --access public --registry=https://registry.npmjs.org/',
+);
