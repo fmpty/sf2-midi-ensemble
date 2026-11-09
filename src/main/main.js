@@ -16,6 +16,7 @@ const ROOT = path.join(__dirname, '..', '..');
 const RENDERER_DIR = path.join(ROOT, 'src', 'renderer');
 const SOUNDFONT_DIR = path.join(ROOT, 'assets', 'soundfonts');
 const PROCESSOR = path.join(RENDERER_DIR, 'dist', 'spessasynth_processor.min.js');
+const APP_ICON = path.join(ROOT, 'assets', 'icon.ico');
 const SOUNDFONT_EXT = ['sf2', 'sf3', 'sfogg', 'dls'];
 
 let win = null;
@@ -121,6 +122,7 @@ function createWindow() {
         backgroundColor: '#0e1116',
         title: 'SF2 MIDI Ensemble',
         autoHideMenuBar: true,
+        ...(fs.existsSync(APP_ICON) ? { icon: APP_ICON } : {}),
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,

@@ -1,5 +1,5 @@
 /**
- * Windows 绿色版：输出到 dist/win-unpacked（与原先 electron-builder 位置一致）。
+ * Windows：按 package.json 的 win.target 打包（dir 绿色版 + nsis 安装程序）。
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -10,40 +10,22 @@ const DIST = path.join(ROOT, 'dist');
 const UNPACKED = path.join(DIST, 'win-unpacked');
 const EXE = 'SF2 MIDI Ensemble.exe';
 
-function sleep(ms) {
-    const end = Date.now() + ms;
-    while (Date.now() < end) { /* 等待 */ }
-}
+const outArg = DIST.replace(/\\/g, '/');
+execSync(`npx electron-builder --win --config.directories.output="${outArg}"`, {
+    stdio: 'inherit',
+    cwd: ROOT,
+    env: { ...process.env, CSC_IDENTITY_AUTO_DISCOVERY: 'false' },
+});
 
-function runBuilder() {
-    const outArg = DIST.replace(/\\/g, '/');
-    execSync(`npx electron-builder --win dir --config.directories.output="${outArg}"`, {
-        stdio: 'inherit',
-        cwd: ROOT,
-        env: { ...process.env, CSC_IDENTITY_AUTO_DISCOVERY: 'false' },
-    });
-}
-
-fs.mkdirSync(DIST, { recursive: true });
-
-let lastErr;
-for (let attempt = 1; attempt <= 3; attempt++) {
-    if (attempt > 1) {
-        console.warn(`打包重试 ${attempt}/3…`);
-        sleep(2500);
-    }
-    try {
-        runBuilder();
-        const exe = path.join(UNPACKED, EXE);
-        console.log('');
-        console.log('绿色版（免安装）:');
-        console.log(`  ${exe}`);
-        process.exit(0);
-    } catch (e) {
-        lastErr = e;
+const exe = path.join(UNPACKED, EXE);
+console.log('');
+console.log('绿色版（免安装）:');
+console.log(`  ${exe}`);
+if (fs.existsSync(DIST)) {
+    for (const name of fs.readdirSync(DIST)) {
+        if (name.endsWith('.exe') && /Setup/i.test(name)) {
+            console.log('安装程序:');
+            console.log(`  ${path.join(DIST, name)}`);
+        }
     }
 }
-
-console.error('');
-console.error('打包失败。请关闭 dist\\win-unpacked 里正在运行的程序、npm start，并关闭资源管理器中打开的 dist 目录后重试。');
-throw lastErr;

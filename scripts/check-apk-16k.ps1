@@ -1,8 +1,17 @@
 ﻿# Check libnativesynth.so 16KB ELF alignment inside debug APK (needs build-tools zipalign + llvm-readelf in NDK)
 param(
-    [string]$Apk = "$PSScriptRoot\..\android\app\build\outputs\apk\debug\app-debug.apk"
+    [string]$Apk = ""
 )
 $ErrorActionPreference = "Stop"
+if (-not $Apk) {
+    $dir = Join-Path $PSScriptRoot "..\android\app\build\outputs\apk\debug"
+    $Apk = Get-ChildItem $dir -Filter "sf2-midi-ensemble-*.apk" -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+    if (-not $Apk) {
+        $Apk = Get-ChildItem $dir -Filter "*.apk" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+    }
+}
 $sdk = $env:ANDROID_HOME
 if (-not $sdk) { $sdk = Join-Path $env:LOCALAPPDATA "Android\Sdk" }
 $zipalign = Get-ChildItem -Path (Join-Path $sdk "build-tools") -Recurse -Filter "zipalign.exe" -ErrorAction SilentlyContinue |

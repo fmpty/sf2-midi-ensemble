@@ -158,7 +158,7 @@ WebView 的 WebAudio 在部分安卓机上走系统「深度缓冲」通路，`o
 
 ```bash
 npm run mobile:android
-# 自动：下载 JDK 21 → Gradle 镜像加速 → 输出 android/app/build/outputs/apk/debug/app-debug.apk
+# 自动：下载 JDK 21 → Gradle 镜像加速 → 输出 android/app/build/outputs/apk/debug/sf2-midi-ensemble-<版本>-debug.apk
 ```
 
 ```bash

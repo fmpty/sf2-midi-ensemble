@@ -1,18 +1,27 @@
 @echo off
+chcp 65001 >nul 2>&1
 setlocal
 cd /d "%~dp0.."
-echo [SF2 MIDI Ensemble] local dist - esbuild + electron-builder
-echo Close dist\win-unpacked app and npm start before pack
-taskkill /IM "SF2 MIDI Ensemble.exe" /F >nul 2>&1
+
+echo.
+echo [SF2 MIDI Ensemble] Win dist - esbuild + electron-builder
+echo.
+
 call npm run dist
 if errorlevel 1 (
-    echo BUILD FAILED - npm run dist
-    echo If EBUSY, quit Electron app and delete dist\win-unpacked then retry
+    echo.
+    echo BUILD FAILED - see errors above
     exit /b 1
 )
+
 echo.
 echo DONE
-echo   Portable: dist\win-unpacked\SF2 MIDI Ensemble.exe
-echo   Installer: dist\SF2 MIDI Ensemble Setup 1.0.0.exe
+echo   portable: dist\win-unpacked\SF2 MIDI Ensemble.exe
+if exist "dist\SF2 MIDI Ensemble Setup 1.0.0.exe" (
+    echo   setup:    dist\SF2 MIDI Ensemble Setup 1.0.0.exe
+) else (
+    echo   setup:    ^(none - check electron-builder log above^)
+)
+echo.
 dir /b dist\*.exe 2>nul
 exit /b 0

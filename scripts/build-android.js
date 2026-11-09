@@ -2,13 +2,22 @@
  * 构建 Android APK。
  * - 自动准备 JDK 17（Adoptium，下载到 .tools/jdk17）
  * - 使用镜像 init script 加速依赖下载
- * - 产出 android/app/build/outputs/apk/debug/app-debug.apk
+ * - 产出 android/app/build/outputs/apk/debug/sf2-midi-ensemble-<version>-debug.apk
  */
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
 const ROOT = path.join(__dirname, '..');
+
+function findDebugApk(androidDir) {
+    const dir = path.join(androidDir, 'app', 'build', 'outputs', 'apk', 'debug');
+    if (!fs.existsSync(dir)) return null;
+    const apks = fs.readdirSync(dir).filter((f) => f.endsWith('.apk'));
+    const named = apks.find((f) => f.startsWith('sf2-midi-ensemble-'));
+    const pick = named || apks.sort().pop();
+    return pick ? path.join(dir, pick) : null;
+}
 const TOOLS = path.join(ROOT, '.tools');
 const JDK_DIR = path.join(TOOLS, 'jdk21');
 const JDK_ZIP = path.join(TOOLS, 'jdk21.zip');
@@ -152,8 +161,8 @@ function prepareAndroidProject() {
             GRADLE_OPTS: (process.env.GRADLE_OPTS || '') + ' -Dorg.gradle.console=plain',
         },
     });
-    const apk = path.join(androidDir, 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk');
-    const apkOk = fs.existsSync(apk);
+    const apk = findDebugApk(androidDir);
+    const apkOk = apk && fs.existsSync(apk);
     const bootInApkTree = path.join(ROOT, 'android', 'app', 'src', 'main', 'assets', 'public', 'dist', 'boot.js');
     if (fs.existsSync(bootInApkTree)) {
         const bootText = fs.readFileSync(bootInApkTree, 'utf8');
@@ -190,7 +199,7 @@ function prepareAndroidProject() {
     }
 
     if (!ok) {
-        console.error('\nGradle 构建失败（见上方报错）。未生成新 APK，请勿安装旧的 app-debug.apk。');
+        console.error('\nGradle 构建失败（见上方报错）。未生成新 APK，请勿安装旧的 debug 包。');
         process.exit(1);
     }
 
