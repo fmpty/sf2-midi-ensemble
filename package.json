@@ -19,7 +19,9 @@
     "web": "node scripts/build.js && node tools/serve.js",
     "web:serve": "node tools/serve.js",
     "web:https": "node scripts/build.js && node tools/serve.js --https --lan",
-    "web:watch": "node scripts/build.js --watch"
+    "web:watch": "node scripts/build.js --watch",
+    "publish:npm": "node scripts/npm-publish-staging.js",
+    "publish:npm:go": "node scripts/npm-publish-staging.js && npm publish .npm-staging --access public"
   },
   "dependencies": {
     "@julusian/midi": "^3.6.1",
