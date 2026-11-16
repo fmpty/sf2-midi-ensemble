@@ -14,6 +14,8 @@ let startedAt = 0;
 let seq = 0;
 /** @type {object[]} */
 let events = [];
+/** 导入的多轨 SMF（录制数据为 false） */
+let importedSmfMultiTrack = false;
 const held = new Set();
 const lastProgram = new Map();
 let playTimer = 0;
@@ -26,7 +28,8 @@ function nowMs() {
 }
 
 export function hasPerformance() {
-    return events.some((e) => e.live);
+    if (!events.length) return false;
+    return events.some((e) => (e.type === 0x90 && e.b > 0) || e.live);
 }
 
 export function performanceDurationMs() {
@@ -157,6 +160,7 @@ export function captureRouteProgram(route) {
 
 export function startRecording(routes) {
     events = [];
+    importedSmfMultiTrack = false;
     held.clear();
     lastProgram.clear();
     seq = 0;
@@ -185,6 +189,220 @@ export function stopRecording() {
 
 function sortedEvents() {
     return events.slice().sort((a, b) => a.ms - b.ms || a.ord - b.ord);
+}
+
+export function getPerformanceEvents() {
+    return sortedEvents();
+}
+
+export function jianpuTrackGrouping(events) {
+    if (importedSmfMultiTrack) return 'smf';
+    const list = events || [];
+    const withTrk = list.filter((e) => e.trk != null);
+    if (!withTrk.length) return 'channel';
+    const trks = new Set(withTrk.map((e) => e.trk | 0));
+    return trks.size > 1 ? 'smf' : 'channel';
+}
+
+/** 与 summarize / filter / 静音 共用的练习轨 ID */
+export function practiceIdForEvent(e, events = null) {
+    if (!e) return 'ch-0';
+    const list = resolvedPerformanceList(events);
+    const mode = jianpuTrackGrouping(list);
+    const ch = e.ch | 0;
+    if (mode === 'smf' && e.trk != null) return `t-${e.trk | 0}`;
+    return `ch-${ch}`;
+}
+
+function smfTrackId(trk) {
+    return `t-${trk | 0}`;
+}
+
+function resolvedPerformanceList(events) {
+    return events && events.length ? events : getPerformanceEvents();
+}
+
+export function eventMatchesPracticePick(e, selectedIds, events) {
+    const set = selectedIds instanceof Set ? selectedIds : new Set(selectedIds);
+    if (!set.size || !e) return false;
+    const list = resolvedPerformanceList(events);
+    const mode = jianpuTrackGrouping(list);
+    const ch = e.ch | 0;
+    if (mode === 'smf' && e.trk != null) {
+        const trk = e.trk | 0;
+        for (const id of set) {
+            const whole = /^t-(\d+)$/.exec(id);
+            if (whole && trk === Number(whole[1])) return true;
+            const leg = /^t-(\d+)-ch-(\d+)$/.exec(id);
+            if (leg && trk === Number(leg[1]) && ch === Number(leg[2])) return true;
+        }
+        return false;
+    }
+    return set.has(`ch-${ch}`);
+}
+
+/** 回放光标与简谱格子对齐用 */
+export function performanceNoteKey(e) {
+    if (!e) return '';
+    const trk = e.trk == null ? -1 : e.trk | 0;
+    return `${e.ms ?? 0}|${e.ch | 0}|${e.a | 0}|${trk}|${e.ord ?? 0}`;
+}
+
+function channelLabel(ch, drum) {
+    if (drum || ch === 9) return `鼓 · 通道 ${ch + 1}`;
+    return `通道 ${ch + 1}`;
+}
+
+/** @returns {{ id: string, trk?: number, ch?: number, name: string, noteOns: number }[]} */
+export function summarizePerformanceTracks(events) {
+    const list = events || [];
+    const mode = jianpuTrackGrouping(list);
+    const map = new Map();
+    if (mode === 'smf') {
+        for (const e of list) {
+            if (e.trk == null) continue;
+            const ch = e.ch | 0;
+            const id = smfTrackId(e.trk);
+            if (!map.has(id)) {
+                const base = (e.trkName || '').trim() || `轨 ${(e.trk | 0) + 1}`;
+                map.set(id, {
+                    id,
+                    trk: e.trk | 0,
+                    ch,
+                    name: base,
+                    noteOns: 0,
+                    drumCh: 0,
+                });
+            }
+            const row = map.get(id);
+            if (e.type === 0x90 && e.b > 0) row.noteOns += 1;
+            if (ch === 9 || e.drum) row.drumCh += 1;
+        }
+        for (const row of map.values()) {
+            if (row.drumCh > row.noteOns * 0.5) {
+                row.name = `${row.name} · 鼓`;
+            } else if (row.ch != null) {
+                row.name = `${row.name} · ${channelLabel(row.ch, row.drumCh > 0)}`;
+            }
+        }
+    } else {
+        for (const e of list) {
+            const ch = e.ch | 0;
+            const id = `ch-${ch}`;
+            if (!map.has(id)) {
+                map.set(id, { id, ch, name: channelLabel(ch, e.drum), noteOns: 0 });
+            }
+            if (e.type === 0x90 && e.b > 0) map.get(id).noteOns += 1;
+        }
+    }
+    const out = [...map.values()];
+    out.sort((a, b) => {
+        if (a.trk != null && b.trk != null) return a.trk - b.trk;
+        return (a.ch | 0) - (b.ch | 0);
+    });
+    for (const t of out) {
+        if (!t.noteOns) t.name += '（无旋律）';
+    }
+    return out;
+}
+
+/** 当前练习轨的全部 Note On（按时间排序）——简谱与跟奏唯一数据源 */
+export function buildPracticeNoteList(events, selectedIds) {
+    const set = selectedIds instanceof Set ? selectedIds : new Set(selectedIds);
+    if (!set.size) return [];
+    const list = resolvedPerformanceList(events);
+    const out = [];
+    for (const e of list) {
+        if (e.type !== 0x90 || e.b <= 0) continue;
+        if (!eventMatchesPracticePick(e, set, list)) continue;
+        out.push(e);
+    }
+    out.sort((a, b) => a.ms - b.ms || (a.ord | 0) - (b.ord | 0));
+    return out;
+}
+
+export function filterJianpuNoteEvents(events, selectedIds) {
+    return buildPracticeNoteList(events, selectedIds);
+}
+
+export function shouldAdvanceJianpuCursor(e, selectedIds) {
+    if (!e || e.type !== 0x90 || e.b <= 0) return false;
+    return eventMatchesPracticePick(e, selectedIds, getPerformanceEvents());
+}
+
+export function isPracticeTrackMuted(e, selectedIds) {
+    if (!selectedIds || !selectedIds.size) return false;
+    if (e.type !== 0x90 && e.type !== 0x80 && !(e.type === 0x90 && e.b === 0)) {
+        return false;
+    }
+    return eventMatchesPracticePick(e, selectedIds, getPerformanceEvents());
+}
+
+const MAIN_MELODY_NAME =
+    /melody|vocal|voice|主旋律|人声|主唱|主音|唱歌|主律|song|singer|lead\s/i;
+const ACCOMP_NAME =
+    /鼓|drum|perc|hit|kick|snare|bass|ba\b|低音|和弦|chord|pad|comp|accomp|rhythm|gm drum|drum\s*--/i;
+
+/** 从多轨 MIDI 猜「主旋律」轨，用于常规单线简谱 */
+export function detectMainMelodyTrack(tracks, events = null) {
+    const list = resolvedPerformanceList(events);
+    const playable = (tracks || []).filter((t) => t.noteOns > 0);
+    if (!playable.length) return null;
+    let best = null;
+    let bestScore = -Infinity;
+    for (const t of playable) {
+        let score = 0;
+        const name = t.name || '';
+        if (MAIN_MELODY_NAME.test(name)) score += 120;
+        if (/^melody:/i.test(name) || /\bwn\s+pan/i.test(name)) score += 80;
+        if (/piano|pn\b|keyboard|键盘/i.test(name) && !/chord|和弦/i.test(name)) score += 35;
+        if (/lead/i.test(name) && !/drum/i.test(name)) score += 45;
+        if (ACCOMP_NAME.test(name)) score -= 200;
+        if ((t.ch | 0) === 9) score -= 160;
+        if (t.noteOns > 1800) score -= 90;
+        if (t.noteOns >= 60 && t.noteOns <= 1400) score += 25;
+        if (t.noteOns < 30) score -= 40;
+        const notes = buildPracticeNoteList(list, new Set([t.id]));
+        if (notes.length) {
+            const avg = notes.reduce((s, n) => s + (n.a | 0), 0) / notes.length;
+            if (avg >= 58 && avg <= 88) score += 30;
+            if (avg < 52) score -= 50;
+        }
+        if (score > bestScore) {
+            bestScore = score;
+            best = t;
+        }
+    }
+    return best?.id ?? playable[0].id;
+}
+
+export function defaultJianpuTrackSelection(tracks) {
+    const id = detectMainMelodyTrack(tracks);
+    return id ? new Set([id]) : new Set();
+}
+
+/**
+ * 同一时刻多音（和弦垫）只保留最高音，排成常规单旋律简谱
+ * @param {object[]} noteOns 已按时间排序
+ */
+export function collapseToMelodyLine(noteOns, windowMs = 50) {
+    if (!noteOns?.length) return [];
+    const out = [];
+    let batch = [noteOns[0]];
+    const flush = () => {
+        const pick = batch.reduce((a, b) => ((a.a | 0) >= (b.a | 0) ? a : b));
+        out.push(pick);
+    };
+    for (let i = 1; i < noteOns.length; i++) {
+        const e = noteOns[i];
+        if (e.ms - batch[0].ms <= windowMs) batch.push(e);
+        else {
+            flush();
+            batch = [e];
+        }
+    }
+    flush();
+    return out;
 }
 
 function vlq(n) {
@@ -365,10 +583,12 @@ export function parseMidi(buffer) {
     for (const tr of tracks) map.push(...tr.tempos);
     map.sort((x, y) => x.tick - y.tick);
     const out = [];
-    for (const tr of tracks) {
+    for (let t = 0; t < tracks.length; t++) {
+        const tr = tracks[t];
         const named = /^ch-(\d+)(d)?$/.exec((tr.name || '').trim());
         const fixedCh = named ? Number(named[1]) : null;
         const drumTrack = !!(named && named[2]);
+        const trkName = (tr.name || '').trim();
         for (const e of tr.evs) {
             if (e.type < 0x80 || e.type > 0xe0) continue;
             out.push({
@@ -379,6 +599,8 @@ export function parseMidi(buffer) {
                 a: e.a,
                 b: e.b,
                 drum: e.type === 0xc0 && (drumTrack || (fixedCh == null && e.ch === 9)),
+                trk: t,
+                trkName: trkName || undefined,
             });
         }
     }
@@ -389,12 +611,44 @@ export function parseMidi(buffer) {
 export function loadPerformance(list) {
     stopPlayback();
     events = (list || []).map((e, i) => ({ ...e, ord: i }));
+    const trks = new Set(events.map((e) => e.trk).filter((t) => t != null));
+    importedSmfMultiTrack = trks.size > 1;
     seq = events.length;
     capturing = false;
     held.clear();
 }
 
 let playing = false;
+/** @type {null | (() => void)} */
+let playTick = null;
+let playT0 = 0;
+let playClockPaused = 0;
+let playClockPauseStart = 0;
+const PLAY_EVENTS_PER_STEP = 24;
+
+function playbackTimelineMs() {
+    let pause = playClockPaused;
+    if (playClockPauseStart) pause += performance.now() - playClockPauseStart;
+    return performance.now() - playT0 - pause;
+}
+
+/** 应用休眠/唤醒：冻结时间轴，避免积压事件一口气播完 */
+export function onPlaybackVisibility(hidden) {
+    if (!playing) return;
+    if (hidden) {
+        if (!playClockPauseStart) playClockPauseStart = performance.now();
+        if (playTimer) {
+            clearTimeout(playTimer);
+            playTimer = 0;
+        }
+        return;
+    }
+    if (playClockPauseStart) {
+        playClockPaused += performance.now() - playClockPauseStart;
+        playClockPauseStart = 0;
+    }
+    if (playTick) playTick();
+}
 
 export function isPlaying() {
     return playing;
@@ -424,6 +678,9 @@ export function stopPlayback(noteOff) {
         for (const n of notes) noteOff(n.ch, n.note);
     }
     suppress = false;
+    playTick = null;
+    playClockPaused = 0;
+    playClockPauseStart = 0;
     return was;
 }
 
@@ -439,24 +696,42 @@ export function playPerformance(sink, onDone) {
     suppress = true;
     playNotes = [];
     playStarted = performance.now();
+    playT0 = playStarted;
+    playClockPaused = 0;
+    playClockPauseStart = 0;
     const banks = new Map();
-    const t0 = playStarted;
     let i = 0;
     const finish = () => {
         if (gen !== playGen) return;
         playing = false;
         playGen++;
         playTimer = 0;
+        playTick = null;
+        playClockPaused = 0;
+        playClockPauseStart = 0;
         const hanging = playNotes;
         playNotes = [];
-        for (const n of hanging) sink({ type: 0x80, ch: n.ch, a: n.note, b: 0, bank: { msb: 0, lsb: 0 } });
+        for (const n of hanging) {
+            sink({
+                type: 0x80,
+                ch: n.ch,
+                a: n.note,
+                b: 0,
+                trk: n.trk,
+                drum: n.drum,
+                bank: { msb: 0, lsb: 0 },
+            });
+        }
         suppress = false;
         if (onDone) onDone();
     };
     const step = () => {
         if (gen !== playGen) return;
-        const elapsed = performance.now() - t0;
-        while (i < list.length && list[i].ms <= elapsed + 2) {
+        playTick = step;
+        const elapsed = playbackTimelineMs();
+        let burst = 0;
+        while (i < list.length && list[i].ms <= elapsed + 2 && burst < PLAY_EVENTS_PER_STEP) {
+            burst++;
             const e = list[i++];
             if (e.type === 0xb0 && (e.a === 0 || e.a === 32)) {
                 const bank = banks.get(e.ch) || { msb: 0, lsb: 0 };
@@ -464,8 +739,9 @@ export function playPerformance(sink, onDone) {
                 else bank.lsb = e.b;
                 banks.set(e.ch, bank);
             }
-            if (e.type === 0x90 && e.b > 0) playNotes.push({ ch: e.ch, note: e.a });
-            else if (e.type === 0x80 || (e.type === 0x90 && e.b === 0)) {
+            if (e.type === 0x90 && e.b > 0) {
+                playNotes.push({ ch: e.ch, note: e.a, trk: e.trk, drum: e.drum });
+            } else if (e.type === 0x80 || (e.type === 0x90 && e.b === 0)) {
                 playNotes = playNotes.filter((n) => n.ch !== e.ch || n.note !== e.a);
             }
             const bank = banks.get(e.ch) || { msb: 0, lsb: 0 };
@@ -473,7 +749,7 @@ export function playPerformance(sink, onDone) {
         }
         if (gen !== playGen) return;
         if (i < list.length) {
-            const wait = Math.max(0, list[i].ms - (performance.now() - t0));
+            const wait = Math.max(0, list[i].ms - elapsed);
             playTimer = setTimeout(step, Math.min(wait, 40));
         } else finish();
     };

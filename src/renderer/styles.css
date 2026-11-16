@@ -208,6 +208,202 @@ html[data-orient="landscape"] #pane-more > .panel.grow {
 .chip.on { background: rgba(78, 161, 255, .18); border-color: var(--accent); color: var(--text); }
 .chip.off { opacity: .5; }
 
+/* 横屏：上方伴奏简谱，下方键盘 */
+#pane-play {
+    min-height: 0;
+}
+/* 横屏无简谱：键盘贴底 */
+html[data-orient="landscape"] #pane-play:not(.has-accomp-score) {
+    justify-content: flex-end;
+}
+html[data-orient="landscape"] #pane-play:not(.has-accomp-score) > .piano-wrap {
+    flex: 0 1 auto;
+    margin-top: auto;
+}
+/* 横屏有简谱：简谱在上、键盘高度随内容 */
+html[data-orient="landscape"] #pane-play.has-accomp-score > .piano-wrap {
+    flex: 0 0 auto;
+    min-height: 0;
+    margin-top: 0;
+}
+html[data-orient="landscape"] #pane-play.has-accomp-score > .live-jianpu:not(.hidden) {
+    flex: 1 1 0;
+    min-height: 0;
+    max-height: none;
+    display: flex;
+    flex-direction: column;
+}
+/* 竖屏：与未加简谱前一致，键盘区撑满中间高度（勿 flex-shrink） */
+html[data-orient="portrait"] #pane-play > .piano-wrap {
+    flex: 1 1 0;
+    min-height: 0;
+    margin-top: 0;
+}
+html[data-orient="landscape"] #pane-play {
+    min-height: 0;
+}
+html[data-orient="landscape"] .live-jianpu:not(.hidden) {
+    width: 100%;
+    align-self: stretch;
+    box-sizing: border-box;
+    gap: 8px;
+    padding: 8px 10px 4px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: linear-gradient(180deg, rgba(26, 35, 50, .92), rgba(18, 24, 34, .88));
+}
+html[data-orient="landscape"] .live-jianpu.hidden {
+    display: none;
+}
+/* 竖屏不显示伴奏简谱，演奏页布局与原先一致 */
+html[data-orient="portrait"] #live-jianpu {
+    display: none !important;
+}
+.live-jianpu-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    flex: none;
+    flex-wrap: wrap;
+}
+.live-jianpu-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--muted);
+    flex: none;
+}
+.live-jianpu-status {
+    font-size: 12px;
+    color: var(--accent-2);
+    min-width: 0;
+    text-align: right;
+}
+.live-jianpu-stream-wrap {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow: hidden;
+    border-top: 1px dashed var(--line);
+    padding-top: 8px;
+    display: flex;
+    flex-direction: column;
+}
+.live-jianpu-pages {
+    flex: 1 1 0;
+    min-height: 0;
+    height: 100%;
+    position: relative;
+}
+.jp-page {
+    display: none;
+    height: 100%;
+    min-height: 0;
+    padding: 2px 0 4px;
+    box-sizing: border-box;
+}
+.jp-page.active {
+    display: grid;
+    grid-template-rows: repeat(4, minmax(0, 1fr));
+    gap: 4px;
+}
+.jp-page.jp-page-enter {
+    animation: jp-page-in .22s ease;
+}
+@keyframes jp-page-in {
+    from { opacity: 0.35; }
+    to { opacity: 1; }
+}
+.jp-row {
+    display: grid;
+    width: 100%;
+    gap: 2px 6px;
+    align-items: end;
+    align-content: end;
+    min-height: 0;
+    overflow: hidden;
+}
+.rec-track-pick {
+    margin-top: 6px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--line);
+}
+.rec-track-pick.hidden {
+    display: none;
+}
+.rec-track-chips {
+    margin-top: 6px;
+}
+.live-jianpu-hint {
+    flex: none;
+    margin: 0;
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.4;
+}
+.jp-cell {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 0 1px 2px;
+    color: var(--text);
+    line-height: 1.05;
+    transition: color .15s ease, opacity .15s ease, box-shadow .15s ease;
+}
+.jp-cell.cursor {
+    color: #9fd0ff;
+    box-shadow: 0 0 0 2px rgba(78, 161, 255, .4);
+    border-radius: 4px;
+}
+.jp-cell.past {
+    opacity: .45;
+}
+.jp-cell.drum {
+    font-size: 10px;
+    line-height: 1.2;
+    text-align: center;
+    color: #c8b896;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.jp-page .jp-num {
+    font-size: clamp(14px, 2.6vmin, 24px);
+    font-weight: 700;
+    font-family: "Segoe UI", system-ui, sans-serif;
+    line-height: 1;
+}
+.jp-acc {
+    font-size: 9px;
+    line-height: 1;
+    margin-top: 1px;
+    color: #f0b870;
+}
+.jp-page .jp-dots {
+    font-size: 8px;
+    line-height: 1;
+    letter-spacing: 0;
+    color: var(--accent-2);
+}
+.jp-page .jp-dots.high { margin-bottom: 1px; }
+.jp-page .jp-dots.low { margin-top: 1px; }
+.jp-underlines {
+    display: block;
+    font-size: 9px;
+    line-height: 1;
+    letter-spacing: 1px;
+    color: var(--text-2, #8a9aaa);
+    margin-top: 2px;
+}
+html[data-orient="landscape"] .piano-wrap {
+    flex: none;
+    align-items: flex-end;
+}
+
 .piano-wrap { flex: 1; min-height: 0; display: flex; align-items: flex-end; }
 
 /*

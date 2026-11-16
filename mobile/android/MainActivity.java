@@ -42,6 +42,20 @@ public class MainActivity extends BridgeActivity {
         tintWebViewBackground();
     }
 
+    @Override
+    public void onPause() {
+        dispatchWebLifecycle("sf2-app-background");
+        super.onPause();
+    }
+
+    private void dispatchWebLifecycle(String eventName) {
+        if (getBridge() == null) return;
+        WebView webView = getBridge().getWebView();
+        if (webView == null) return;
+        String js = "window.dispatchEvent(new Event('" + eventName + "'));";
+        webView.post(() -> webView.evaluateJavascript(js, null));
+    }
+
     /** 屏幕钢琴：WebView JavascriptInterface → nativeNoteOn/Off */
     private void attachPianoJsBridge() {
         if (pianoJsAttached || getBridge() == null) return;

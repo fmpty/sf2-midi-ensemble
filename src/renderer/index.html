@@ -57,6 +57,16 @@
 
     <main>
         <section id="pane-play" class="tab-pane active">
+            <div id="live-jianpu" class="live-jianpu hidden" aria-hidden="true">
+                <div class="live-jianpu-head">
+                    <div class="live-jianpu-label">伴奏简谱</div>
+                    <div class="live-jianpu-status" aria-live="polite"></div>
+                </div>
+                <div class="live-jianpu-stream-wrap">
+                    <div class="live-jianpu-pages"></div>
+                </div>
+                <p class="live-jianpu-hint">横屏播放时跟简谱；练习轨在设置里选</p>
+            </div>
             <div class="piano-wrap">
                 <div id="piano" class="piano"></div>
             </div>
@@ -118,6 +128,11 @@
                         <span id="rec-volume-val" class="val">100</span>
                     </div>
                     <p id="rec-status" class="hint">未录制</p>
+                    <div id="rec-track-pick" class="rec-track-pick hidden">
+                        <p class="hint">默认「主旋律」：数字 1–7 单行简谱；点其它轨可练鼓/对位。播放时练习轨静音。</p>
+                        <p id="rec-track-hint" class="hint hidden"></p>
+                        <div id="rec-track-chips" class="chips rec-track-chips"></div>
+                    </div>
                 </div>
             </div>
             <div class="panel grow">

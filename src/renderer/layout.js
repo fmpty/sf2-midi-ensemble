@@ -31,6 +31,7 @@ export function applyLayout() {
     document.body.classList.toggle('touch-ui', touch);
 
     scheduleSyncJianpuPianoMetrics();
+    window.dispatchEvent(new CustomEvent('layout-change', { detail: { orient, tier } }));
 
     return { tier, orient, width: w, height: h, touch };
 }

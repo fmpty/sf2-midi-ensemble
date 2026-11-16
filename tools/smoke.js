@@ -103,6 +103,28 @@ app.whenReady().then(async () => {
     })()`);
     log('快速滑奏 ' + JSON.stringify(glide));
 
+    const jianpu = await win.webContents.executeJavaScript(`(() => {
+        const e = window.__ensemble;
+        e.showTab('play');
+        const jp = e.liveJianpu;
+        const fake = [
+            { ms: 0, type: 0x90, ch: 0, a: 60, b: 100, ord: 0 },
+            { ms: 200, type: 0x90, ch: 0, a: 62, b: 100, ord: 1 },
+        ];
+        jp.loadScore(fake, () => ({ transpose: 0, isDrum: false }));
+        jp.setPlaybackCursor(1);
+        const root = document.getElementById('live-jianpu');
+        const pages = root?.querySelector('.live-jianpu-pages');
+        return {
+            visible: root && !root.classList.contains('hidden'),
+            scoreCells: pages?.querySelectorAll('.jp-cell').length ?? 0,
+            cursor: !!pages?.querySelector('.jp-cell.cursor'),
+            pageActive: !!pages?.querySelector('.jp-page.active'),
+        };
+    })()`);
+    log('伴奏简谱 ' + JSON.stringify(jianpu));
+    if (!jianpu.visible || jianpu.scoreCells < 2 || !jianpu.cursor) log('FAIL 伴奏简谱未加载或光标异常');
+
     const state = await win.webContents.executeJavaScript(`(() => {
         const e = window.__ensemble;
         return JSON.stringify({
