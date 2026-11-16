@@ -517,8 +517,11 @@ public class MidiBridgePlugin extends Plugin {
             midiManager.openBluetoothDevice(dev, device -> {
                 opening.remove(key);
                 if (device == null) {
-                    layerLog("L3-open", "openBluetoothDevice null key=" + key);
-                    closeDevice(key, "openBluetooth-null");
+                    layerLog("L3-open", "openBluetoothDevice null key=" + key + " → gatt");
+                    JSObject m = meta.get(key);
+                    if (m != null) m.put("connected", false);
+                    scheduleGattFallback(key);
+                    mainHandler.post(MidiBridgePlugin.this::emitDevices);
                     return;
                 }
                 attachOutputPort(key, device);
@@ -526,7 +529,12 @@ public class MidiBridgePlugin extends Plugin {
         } catch (RuntimeException e) {
             layerLog("L3-open", "openBluetooth exception key=" + key);
             opening.remove(key);
-            meta.remove(key);
+            if (meta.containsKey(key)) {
+                scheduleGattFallback(key);
+                mainHandler.post(MidiBridgePlugin.this::emitDevices);
+            } else {
+                meta.remove(key);
+            }
         }
     }
 
@@ -672,6 +680,9 @@ public class MidiBridgePlugin extends Plugin {
         }
         layerLog("L3-port", "gatt fallback start key=" + key);
         try {
+            int transport = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                    ? BluetoothDevice.TRANSPORT_AUTO
+                    : BluetoothDevice.TRANSPORT_LE;
             BluetoothGatt gatt = dev.connectGatt(ctx, false, new BluetoothGattCallback() {
                 @Override
                 public void onConnectionStateChange(BluetoothGatt g, int status, int newState) {
@@ -688,7 +699,7 @@ public class MidiBridgePlugin extends Plugin {
                     byte[] value = ch.getValue();
                     if (value != null && value.length > 0) onBleMidiPacket(key, value);
                 }
-            }, BluetoothDevice.TRANSPORT_LE);
+            }, transport);
             if (gatt != null) gattSessions.put(key, gatt);
         } catch (SecurityException e) {
             layerLog("L3-port", "gatt security key=" + key);
@@ -719,7 +730,7 @@ public class MidiBridgePlugin extends Plugin {
             emitDevices();
             if (!wasLive && meta.containsKey(key)) {
                 int n = gattRetry.getOrDefault(key, 0);
-                if (n < 2) {
+                if (n < 5) {
                     gattRetry.put(key, n + 1);
                     layerLog("L3-port", "gatt retry key=" + key + " n=" + (n + 1));
                     mainHandler.postDelayed(() -> startBleMidiFallback(key), 800);
@@ -1250,7 +1261,53 @@ public class MidiBridgePlugin extends Plugin {
         layerLog("L3-retry", "openAllMidiRetryPass");
         openBondedMidiControllers();
         openAllSystemMidi();
+        ensureGattForLinkedBonded();
         emitDevices();
+    }
+
+    /**
+     * 鸿蒙卓易通等兼容层：系统 openBluetoothDevice / openOutputPort 常失败，
+     * 但 ACL 已连。对已配对且链路有效的手柄主动走 BLE-MIDI GATT。
+     */
+    private void ensureGattForLinkedBonded() {
+        if (!hasBluetoothPermission() || midiManager == null) return;
+        Context ctx = getContext();
+        if (ctx == null) return;
+        BluetoothManager bm = (BluetoothManager) ctx.getSystemService(Context.BLUETOOTH_SERVICE);
+        if (bm == null || bm.getAdapter() == null) return;
+        Set<BluetoothDevice> bonded;
+        try {
+            bonded = bm.getAdapter().getBondedDevices();
+        } catch (SecurityException e) {
+            return;
+        }
+        if (bonded == null) return;
+        for (BluetoothDevice dev : bonded) {
+            String addr = dev.getAddress();
+            if (addr == null) continue;
+            String macNorm = macFromAddr(addr);
+            if (macNorm.isEmpty() || hasOpenPortForMac(macNorm)) continue;
+            if (!isBtLinkConnected(bm, dev)) continue;
+            if (!looksLikeMidiController(safeDeviceName(dev))) continue;
+            String key = btKeyFromAddr(addr);
+            if (key == null) continue;
+            if (opened.containsKey(key) || gattLive.contains(key) || gattSessions.containsKey(key)) continue;
+            if (gattPending.contains(key) || opening.contains(key)) continue;
+            if (!meta.containsKey(key)) {
+                String name = safeDeviceName(dev);
+                if (name == null) name = addr;
+                JSObject obj = new JSObject();
+                obj.put("id", key);
+                obj.put("name", name);
+                obj.put("manufacturer", "");
+                obj.put("type", "bluetooth");
+                obj.put("connected", false);
+                putMac(obj, addr);
+                meta.put(key, obj);
+                layerLog("L3-port", "gatt bootstrap meta key=" + key);
+            }
+            scheduleGattFallback(key);
+        }
     }
 
     private void openAllMidiWithRetry() {

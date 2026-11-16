@@ -1835,6 +1835,9 @@ async function main() {
         if (isMobile() || tierFromWidth(window.innerWidth) !== 'desktop') {
             await keepAwake(true);
         }
+        if (isNativeMidiAvailable() && /HarmonyOS|OpenHarmony|ArkWeb/i.test(navigator.userAgent)) {
+            log('鸿蒙设备：蓝牙手柄若显示灰色，请在系统蓝牙中确认已连接后点「刷新设备列表」；卓易通兼容层若仍无法演奏，可改用 Chrome 打开 Web 版（GitHub Pages）。', 'info');
+        }
     } catch (e) {
         log(`读取应用信息失败：${e.message}`, 'warn');
     }
