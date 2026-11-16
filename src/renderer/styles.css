@@ -347,8 +347,10 @@ html[data-orient="portrait"] .piano:not(.jianpu) { height: clamp(110px, 26vh, 24
 /* ---------------- 音源页 ---------------- */
 .bank-list { display: flex; flex-direction: column; gap: 6px; overflow: auto; }
 .bank-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.bank-item.is-ignored { opacity: 0.72; border-style: dashed; }
 .bank-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bank-ops { display: flex; gap: 4px; flex: none; }
+.bank-ops { display: flex; gap: 4px; flex: none; flex-wrap: wrap; justify-content: flex-end; }
+.tag-muted { color: var(--muted); border-color: var(--muted); }
 
 /* ---------------- 日志 ---------------- */
 .log {

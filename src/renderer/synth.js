@@ -98,8 +98,7 @@ export class SynthEngine {
         this.analyser.connect(ctx.destination);
 
         this.synth.eventHandler.addEvent('presetListChange', 'app', () => {
-            this.presets = [...(this.synth.presetList || [])];
-            this.emit('presets', this.presets);
+            this.rebuildPresetList();
         });
         this.synth.eventHandler.addEvent('soundBankError', 'app', (err) => {
             this.emit('bankError', err);
@@ -108,8 +107,7 @@ export class SynthEngine {
         await this.synth.isReady;
         await ctx.resume();
         this.synth.setLogLevel(false, true, false);
-        this.presets = [...(this.synth.presetList || [])];
-        this.emit('presets', this.presets);
+        this.rebuildPresetList();
         this.emit('started');
     }
 
@@ -117,10 +115,9 @@ export class SynthEngine {
     async addBank(arrayBuffer, name) {
         const id = `bank${++this.bankSeq}`;
         await this.synth.soundBankManager.addSoundBank(arrayBuffer, id);
-        this.banks.push({ id, name });
-        this.presets = [...(this.synth.presetList || [])];
+        this.banks.push({ id, name, ignored: false });
+        this.rebuildPresetList();
         this.emit('banks', this.banks);
-        this.emit('presets', this.presets);
         return id;
     }
 
@@ -128,14 +125,39 @@ export class SynthEngine {
         if (this.banks.length <= 1) return false;
         await this.synth.soundBankManager.deleteSoundBank(id);
         this.banks = this.banks.filter((b) => b.id !== id);
-        this.presets = [...(this.synth.presetList || [])];
+        this.rebuildPresetList();
         this.emit('banks', this.banks);
-        this.emit('presets', this.presets);
         return true;
     }
 
+    rebuildPresetList() {
+        const full = [...(this.synth?.presetList || [])];
+        const ignored = new Set(this.banks.filter((b) => b.ignored).map((b) => b.id));
+        this.presets = full.filter((p) => !ignored.has(p.bankId));
+        this.emit('presets', this.presets);
+    }
+
+    applyActiveBanks() {
+        const ids = this.banks.filter((b) => !b.ignored).map((b) => b.id);
+        if (ids.length) this.synth.soundBankManager.priorityOrder = ids;
+        this.rebuildPresetList();
+    }
+
+    setBankIgnored(id, ignored) {
+        const b = this.banks.find((x) => x.id === id);
+        if (!b) return;
+        b.ignored = ignored;
+        this.applyActiveBanks();
+    }
+
     setBankOrder(ids) {
-        this.synth.soundBankManager.priorityOrder = ids;
+        const order = ids
+            .filter((id) => {
+                const b = this.banks.find((x) => x.id === id);
+                return b && !b.ignored;
+            });
+        if (order.length) this.synth.soundBankManager.priorityOrder = order;
+        this.rebuildPresetList();
     }
 
     setMasterVolume(v) {

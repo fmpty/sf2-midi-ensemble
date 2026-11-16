@@ -60,6 +60,8 @@ const state = {
     keyboardEnabled: true,
     selected: null,
     midiReady: false,
+    /** 按音源路径或文件名记住「忽略」状态（仍保留在列表中，不参与匹配与发声） */
+    bankIgnored: {},
 };
 
 /** WebAudio + spessasynth 仅在桌面/回退时按需加载（Android 原生包首屏不下载 ~1.3MB） */
@@ -1150,27 +1152,100 @@ function renderPiano() {
 
 /* ------------------------------ 音源管理 ------------------------------ */
 
+function bankPersistKey(b) {
+    if (!b) return '';
+    const path = (b.path && String(b.path).trim()) || '';
+    return path || b.name || b.id;
+}
+
+function activeBankCount() {
+    return engine.banks.filter((b) => !b.ignored).length;
+}
+
+function applyBankIgnoredFromState() {
+    const ign = state.bankIgnored || {};
+    for (const b of engine.banks) {
+        const key = bankPersistKey(b);
+        b.ignored = !!(key && ign[key]);
+        if (engine.bankMeta && engine.native) {
+            const m = String(b.id).match(/^native(\d+)$/);
+            if (m) engine.bankMeta[parseInt(m[1], 10)].ignored = b.ignored;
+        }
+    }
+}
+
+async function applyBankActiveState() {
+    applyBankIgnoredFromState();
+    if (typeof engine.applyActiveBanks === 'function') {
+        const r = engine.applyActiveBanks();
+        if (r && typeof r.then === 'function') await r;
+    } else if (typeof engine.setBankOrder === 'function') {
+        const r = engine.setBankOrder(engine.banks.map((b) => b.id));
+        if (r && typeof r.then === 'function') await r;
+    }
+    applyAllRoutes();
+}
+
+async function toggleBankIgnore(bankId) {
+    const b = engine.banks.find((x) => x.id === bankId);
+    if (!b) return;
+    const next = !b.ignored;
+    if (next && activeBankCount() <= 1) {
+        log('至少保留一个生效音源', 'warn');
+        return;
+    }
+    const key = bankPersistKey(b);
+    if (engine.setBankIgnored) await engine.setBankIgnored(bankId, next);
+    else {
+        b.ignored = next;
+        if (engine.applyActiveBanks) engine.applyActiveBanks();
+        else engine.setBankOrder?.(engine.banks.map((x) => x.id));
+    }
+    if (next && key) state.bankIgnored[key] = true;
+    else if (key) delete state.bankIgnored[key];
+    saveConfig();
+    applyAllRoutes();
+    renderBanks();
+    renderDevices();
+    log(next ? `已忽略音源：${b.name}` : `已恢复音源：${b.name}`, 'ok');
+}
+
 function renderBanks() {
     const list = engine.banks;
     dom.bankList.innerHTML = '';
+    const activeN = activeBankCount();
     list.forEach((b, i) => {
         const item = document.createElement('div');
-        item.className = 'bank-item';
+        item.className = `bank-item${b.ignored ? ' is-ignored' : ''}`;
+        const ignoreLabel = b.ignored ? '恢复' : '忽略';
+        const ignoreTitle = b.ignored ? '取消忽略，重新参与匹配与发声' : '忽略：不发声、不出现在乐器列表';
+        const cantIgnore = !b.ignored && activeN <= 1;
         item.innerHTML = `
-            <span class="bank-name">${escapeHtml(b.name)}${b.builtin ? ' <span class="tag">内置</span>' : ''}</span>
+            <span class="bank-name">${escapeHtml(b.name)}${b.builtin ? ' <span class="tag">内置</span>' : ''}${b.ignored ? ' <span class="tag tag-muted">已忽略</span>' : ''}</span>
             <span class="bank-ops">
                 <button class="mini" data-act="up" ${i === 0 ? 'disabled' : ''}>↑</button>
                 <button class="mini" data-act="down" ${i === list.length - 1 ? 'disabled' : ''}>↓</button>
+                <button class="mini" data-act="ignore" title="${ignoreTitle}" ${cantIgnore ? 'disabled' : ''}>${ignoreLabel}</button>
                 <button class="mini danger" data-act="del" ${list.length <= 1 ? 'disabled' : ''}>移除</button>
             </span>`;
         item.querySelector('[data-act="up"]').addEventListener('click', () => moveBank(i, -1));
         item.querySelector('[data-act="down"]').addEventListener('click', () => moveBank(i, 1));
-        item.querySelector('[data-act="del"]').addEventListener('click', () => {
+        item.querySelector('[data-act="ignore"]').addEventListener('click', () => { toggleBankIgnore(b.id); });
+        item.querySelector('[data-act="del"]').addEventListener('click', async () => {
+            const key = bankPersistKey(b);
+            if (key) delete state.bankIgnored[key];
+            if (b.path && !b.builtin) {
+                const refs = (await apiGet('bankRefs')) || [];
+                await apiSet('bankRefs', refs.filter((r) => r.path !== b.path));
+            }
+            saveConfig();
             engine.removeBank(b.id).then(() => { renderBanks(); renderDevices(); });
         });
         dom.bankList.appendChild(item);
     });
-    dom.bankCount.textContent = `${list.length} 个音源 · ${engine.presets.length} 个可用音色`;
+    const ignoredN = list.length - activeN;
+    const toneHint = ignoredN ? `（${ignoredN} 个已忽略）` : '';
+    dom.bankCount.textContent = `${list.length} 个音源 · ${activeN} 个生效 · ${engine.presets.length} 个可用音色${toneHint}`;
 }
 
 async function moveBank(i, dir) {
@@ -1178,8 +1253,9 @@ async function moveBank(i, dir) {
     const j = i + dir;
     if (j < 0 || j >= list.length) return;
     [list[i], list[j]] = [list[j], list[i]];
-    engine.setBankOrder(list.map((b) => b.id));
     engine.banks = list;
+    const orderPromise = engine.setBankOrder(list.map((b) => b.id));
+    if (orderPromise && typeof orderPromise.then === 'function') await orderPromise;
     renderBanks();
 }
 
@@ -1187,10 +1263,14 @@ async function addBankFile(name, arrayBuffer, builtin = false, filePath = '') {
     const payload = engine.native && filePath ? filePath : arrayBuffer;
     const id = await engine.addBank(payload, name);
     const bank = engine.banks.find((b) => b.id === id);
-    if (bank) bank.builtin = builtin;
+    if (bank) {
+        bank.builtin = builtin;
+        if (bank.path == null && filePath) bank.path = filePath;
+        applyBankIgnoredFromState();
+        await applyBankActiveState();
+    }
     renderBanks();
     renderDevices();
-    applyAllRoutes();
     await saveBankRef({ name, path: filePath }, builtin);
     log(`已载入音源：${name}`, 'ok');
 }
@@ -1216,6 +1296,7 @@ function saveConfig() {
             master: state.master,
             keyboardEnabled: state.keyboardEnabled,
             selected: state.selected,
+            bankIgnored: state.bankIgnored,
         });
     }, 400);
 }
@@ -1253,6 +1334,7 @@ async function loadConfig() {
     if (state.master.lowLatency == null) state.master.lowLatency = true;
     if (cfg.keyboardEnabled != null) state.keyboardEnabled = cfg.keyboardEnabled;
     if (cfg.selected) state.selected = cfg.selected;
+    if (cfg.bankIgnored && typeof cfg.bankIgnored === 'object') state.bankIgnored = cfg.bankIgnored;
 }
 
 /* ------------------------------ 启动流程 ------------------------------ */
@@ -1283,10 +1365,12 @@ async function ensureEngine(retry = false) {
                 log('未找到内置音源，请通过「载入音源」导入 .sf2/.sf3/.dls 文件', 'warn');
             }
             await restoreExternalBanks();
+        } else {
+            await restoreNativeBanks();
         }
         dom.startOverlay.classList.add('hidden');
         updateStatus();
-        applyAllRoutes();
+        await applyBankActiveState();
         await connectMidi();
     } catch (e) {
         // 原生合成不可用（老设备 / 缺 AAudio / 音源缺失）时回退到 WebAudio，保证能发声
@@ -1316,7 +1400,38 @@ async function restoreExternalBanks() {
             log(`恢复音源失败：${f.name}（${e.message}）`, 'warn');
         }
     }
+    applyBankIgnoredFromState();
+    await applyBankActiveState();
     renderBanks();
+}
+
+/** Android 原生：按上次保存的本地路径重新 loadBank（文件在应用私有目录） */
+async function restoreNativeBanks() {
+    const refs = (await apiGet('bankRefs')) || [];
+    if (!refs.length) {
+        applyBankIgnoredFromState();
+        await applyBankActiveState();
+        renderBanks();
+        return;
+    }
+    let n = 0;
+    for (const ref of refs) {
+        if (!ref.path) continue;
+        const name = ref.name || String(ref.path).split('/').pop() || '音源';
+        try {
+            const id = await engine.addBank(ref.path, name);
+            const bank = engine.banks.find((b) => b.id === id);
+            if (bank) bank.path = ref.path;
+            n++;
+        } catch (e) {
+            log(`恢复音源失败：${name}（${e.message}）`, 'warn');
+        }
+    }
+    applyBankIgnoredFromState();
+    await applyBankActiveState();
+    if (n > 0) log(`已恢复 ${n} 个外置音源`, 'ok');
+    renderBanks();
+    renderDevices();
 }
 
 function toArrayBuffer(data) {

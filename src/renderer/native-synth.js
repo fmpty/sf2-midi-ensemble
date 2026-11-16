@@ -30,7 +30,7 @@ export class NativeSynthEngine {
         this.burstFrames = 0;
         this.voiceCount = 0;
         this.banks = [];
-        /** @type {{ name: string, path?: string, builtin?: boolean }[]} */
+        /** @type {{ name: string, path?: string, builtin?: boolean, ignored?: boolean }[]} */
         this.bankMeta = [];
         this.presets = [];
         this.masterVolume = 0.9;
@@ -118,7 +118,8 @@ export class NativeSynthEngine {
         const p = nativeSynthPlugin();
         if (!p) return;
         const res = await p.getPresets();
-        this.presets = res.presets || [];
+        const ignoredIds = new Set(this.banks.filter((b) => b.ignored).map((b) => b.id));
+        this.presets = (res.presets || []).filter((preset) => !ignoredIds.has(preset.bankId));
         this.emit('presets', this.presets);
     }
 
@@ -145,7 +146,36 @@ export class NativeSynthEngine {
             id: `native${i}`,
             name: m.name,
             builtin: !!m.builtin,
+            path: m.path || '',
+            ignored: !!m.ignored,
         }));
+    }
+
+    async applyActiveBanks() {
+        const p = nativeSynthPlugin();
+        if (!p) return;
+        const active = this.banks.filter((b) => !b.ignored);
+        const order = active.map((b) => {
+            const m = String(b.id).match(/^native(\d+)$/);
+            return m ? parseInt(m[1], 10) : 0;
+        });
+        if (order.length && p.setBankOrder) {
+            await p.setBankOrder({ order: JSON.stringify(order) });
+        }
+        if (p.setBankIgnored) {
+            for (let i = 0; i < this.bankMeta.length; i++) {
+                await p.setBankIgnored({ index: i, ignored: !!this.bankMeta[i].ignored });
+            }
+        }
+        await this.refreshPresets();
+    }
+
+    async setBankIgnored(id, ignored) {
+        const m = String(id).match(/^native(\d+)$/);
+        if (!m || !this.bankMeta[parseInt(m[1], 10)]) return;
+        this.bankMeta[parseInt(m[1], 10)].ignored = ignored;
+        this.syncBankIds();
+        await this.applyActiveBanks();
     }
 
     /** 原生层按文件路径追加音源（可多个并存，与 PC 一致） */
@@ -156,10 +186,10 @@ export class NativeSynthEngine {
         const p = nativeSynthPlugin();
         const res = await p.loadBank({ path: arrayBuffer });
         if (!res || !res.ok) throw new Error('原生音源载入失败');
-        this.bankMeta.push({ name, path: arrayBuffer, builtin: false });
+        this.bankMeta.push({ name, path: arrayBuffer, builtin: false, ignored: false });
         this.syncBankIds();
         this.emit('banks', this.banks);
-        await this.refreshPresets();
+        await this.applyActiveBanks();
         const idx = typeof res.bankIndex === 'number' ? res.bankIndex : this.bankMeta.length - 1;
         return `native${idx}`;
     }
@@ -176,18 +206,22 @@ export class NativeSynthEngine {
         this.bankMeta.splice(index, 1);
         this.syncBankIds();
         this.emit('banks', this.banks);
-        await this.refreshPresets();
+        await this.applyActiveBanks();
         return true;
     }
 
     async setBankOrder(ids) {
         const p = nativeSynthPlugin();
         if (!p || !p.setBankOrder || !ids.length) return;
-        const order = ids.map((id) => {
-            const m = String(id).match(/^native(\d+)$/);
-            return m ? parseInt(m[1], 10) : 0;
-        });
-        await p.setBankOrder({ order: JSON.stringify(order) });
+        const activeOrder = ids
+            .map((id) => {
+                const b = this.banks.find((x) => x.id === id);
+                if (!b || b.ignored) return -1;
+                const m = String(id).match(/^native(\d+)$/);
+                return m ? parseInt(m[1], 10) : -1;
+            })
+            .filter((idx) => idx >= 0);
+        if (activeOrder.length) await p.setBankOrder({ order: JSON.stringify(activeOrder) });
         await this.refreshPresets();
     }
 

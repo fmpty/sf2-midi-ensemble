@@ -62,6 +62,7 @@ std::atomic<int> g_read{0};
 
 struct LoadedBank {
     tsf *font = nullptr;
+    bool ignored = false;
 };
 
 std::vector<LoadedBank> g_banks;
@@ -210,11 +211,26 @@ void applyEvent(tsf *f, const MidiEvent &e) {
     }
 }
 
+int firstActiveBankIndex() {
+    for (int o : g_bankOrder) {
+        if (o >= 0 && o < (int)g_banks.size() && !g_banks[(size_t)o].ignored && g_banks[(size_t)o].font) return o;
+    }
+    for (size_t i = 0; i < g_banks.size(); i++) {
+        if (!g_banks[i].ignored && g_banks[i].font) return (int)i;
+    }
+    for (size_t i = 0; i < g_banks.size(); i++) {
+        if (g_banks[i].font) return (int)i;
+    }
+    return 0;
+}
+
 tsf *fontForChannel(int ch) {
     ch &= 15;
     if (g_banks.empty()) return nullptr;
     int bi = g_channelBank[ch];
-    if (bi < 0 || bi >= (int)g_banks.size()) bi = 0;
+    if (bi < 0 || bi >= (int)g_banks.size() || !g_banks[(size_t)bi].font || g_banks[(size_t)bi].ignored)
+        bi = firstActiveBankIndex();
+    if (bi < 0 || bi >= (int)g_banks.size()) return nullptr;
     return g_banks[(size_t)bi].font;
 }
 
@@ -270,7 +286,7 @@ aaudio_data_callback_result_t dataCallback(AAudioStream *stream, void *userData,
     if ((int)g_mixScratch.size() < samples) g_mixScratch.resize((size_t)samples);
     int voices = 0;
     for (auto &b : g_banks) {
-        if (!b.font) continue;
+        if (!b.font || b.ignored) continue;
         memset(g_mixScratch.data(), 0, (size_t)samples * sizeof(float));
         tsf_render_float(b.font, g_mixScratch.data(), numFrames, 0);
         for (int i = 0; i < samples; i++) out[i] += g_mixScratch[i];
@@ -535,6 +551,12 @@ Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeSetBankOrder(JNIEnv *env, jcl
     }
     env->ReleaseIntArrayElements(jorder, els, JNI_ABORT);
     if (g_bankOrder.empty() && !g_banks.empty()) g_bankOrder.push_back(0);
+}
+
+JNIEXPORT void JNICALL
+Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeSetBankIgnored(JNIEnv *, jclass, jint index, jboolean ignored) {
+    if (index < 0 || index >= (int)g_banks.size()) return;
+    g_banks[(size_t)index].ignored = ignored == JNI_TRUE;
 }
 
 JNIEXPORT void JNICALL

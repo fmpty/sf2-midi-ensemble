@@ -81,6 +81,8 @@ public class SynthBridgePlugin extends Plugin {
 
     public static native void nativeSetBankOrder(int[] order);
 
+    public static native void nativeSetBankIgnored(int index, boolean ignored);
+
     public static native void nativeSetChannelBank(int channel, int bankIndex);
 
     public static native boolean nativeStart();
@@ -403,6 +405,20 @@ public class SynthBridgePlugin extends Plugin {
             res.put("ok", ok);
             res.put("bankCount", nativeGetBankCount());
             call.resolve(res);
+        });
+    }
+
+    @PluginMethod
+    public void setBankIgnored(final PluginCall call) {
+        if (!libOk) {
+            call.reject("原生合成库未加载");
+            return;
+        }
+        final int index = call.getInt("index", -1);
+        final boolean ignored = call.getBoolean("ignored", false);
+        worker.execute(() -> {
+            nativeSetBankIgnored(index, ignored);
+            call.resolve();
         });
     }
 
