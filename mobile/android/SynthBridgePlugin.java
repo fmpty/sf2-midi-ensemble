@@ -569,36 +569,53 @@ public class SynthBridgePlugin extends Plugin {
     }
 
     @PluginMethod
-    public void getPresets(PluginCall call) {
-        int bankCount = nativeGetBankCount();
-        JSArray arr = new JSArray();
-        int[] order = bankPriority.length > 0 ? bankPriority : null;
-        for (int o = 0; o < bankCount; o++) {
-            int bankIndex = order != null && o < order.length ? order[o] : o;
-            if (bankIndex < 0 || bankIndex >= bankCount) continue;
-            int presetCount = nativeGetPresetCount(bankIndex);
-            for (int i = 0; i < presetCount; i++) {
-                String info = nativeGetPresetInfo(bankIndex, i);
-                if (info == null || info.isEmpty()) continue;
-                String[] parts = info.split("\\|");
-                if (parts.length < 3) continue;
-                try {
-                    int bank = Integer.parseInt(parts[1]);
-                    JSObject preset = new JSObject();
-                    preset.put("name", parts[0]);
-                    preset.put("bankMSB", (bank >> 7) & 0x7f);
-                    preset.put("bankLSB", bank & 0x7f);
-                    preset.put("program", Integer.parseInt(parts[2]));
-                    preset.put("bankId", "native" + bankIndex);
-                    preset.put("isDrum", bank >= 128);
-                    arr.put(preset);
-                } catch (NumberFormatException ignored) {
-                }
-            }
+    public void getPresets(final PluginCall call) {
+        if (!libOk) {
+            call.reject("原生合成库未加载");
+            return;
         }
-        JSObject res = new JSObject();
-        res.put("presets", arr);
-        call.resolve(res);
+        worker.execute(() -> {
+            try {
+                int bankCount = nativeGetBankCount();
+                JSArray arr = new JSArray();
+                int[] order = bankPriority.length > 0 ? bankPriority : null;
+                for (int o = 0; o < bankCount; o++) {
+                    int bankIndex = order != null && o < order.length ? order[o] : o;
+                    if (bankIndex < 0 || bankIndex >= bankCount) continue;
+                    int presetCount = nativeGetPresetCount(bankIndex);
+                    for (int i = 0; i < presetCount; i++) {
+                        String info;
+                        try {
+                            info = nativeGetPresetInfo(bankIndex, i);
+                        } catch (Throwable t) {
+                            android.util.Log.w("SynthBridge", "跳过无效预设 bank=" + bankIndex + " i=" + i, t);
+                            continue;
+                        }
+                        if (info == null || info.isEmpty()) continue;
+                        String[] parts = info.split("\\|");
+                        if (parts.length < 3) continue;
+                        try {
+                            int bank = Integer.parseInt(parts[1]);
+                            JSObject preset = new JSObject();
+                            preset.put("name", parts[0]);
+                            preset.put("bankMSB", (bank >> 7) & 0x7f);
+                            preset.put("bankLSB", bank & 0x7f);
+                            preset.put("program", Integer.parseInt(parts[2]));
+                            preset.put("bankId", "native" + bankIndex);
+                            preset.put("isDrum", bank >= 128);
+                            arr.put(preset);
+                        } catch (NumberFormatException ignored) {
+                        }
+                    }
+                }
+                JSObject res = new JSObject();
+                res.put("presets", arr);
+                call.resolve(res);
+            } catch (Throwable t) {
+                android.util.Log.e("SynthBridge", "getPresets 失败", t);
+                call.reject(t.getMessage() != null ? t.getMessage() : "getPresets failed");
+            }
+        });
     }
 
     @PluginMethod

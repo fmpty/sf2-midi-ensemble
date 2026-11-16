@@ -409,6 +409,71 @@ bool openStream() {
     return true;
 }
 
+/** SF2 预设名常含非 UTF-8 或 NUL；JNI NewStringUTF 遇非法序列会直接 abort */
+static void append_loose_utf8_to_jchars(const unsigned char *s, std::vector<jchar> &out) {
+    if (!s) return;
+    while (*s) {
+        const unsigned char c = *s++;
+        uint32_t cp = 0;
+        int need = 0;
+        if (c <= 0x7F) {
+            cp = c;
+            if (cp == 0) continue;
+        } else if ((c & 0xE0) == 0xC0) {
+            need = 1;
+            cp = c & 0x1F;
+        } else if ((c & 0xF0) == 0xE0) {
+            need = 2;
+            cp = c & 0x0F;
+        } else if ((c & 0xF8) == 0xF0) {
+            need = 3;
+            cp = c & 0x07;
+        } else {
+            out.push_back('?');
+            continue;
+        }
+        bool ok = (need == 0);
+        if (!ok) {
+            ok = true;
+            for (int i = 0; i < need; i++) {
+                const unsigned char n = *s;
+                if (!n || (n & 0xC0) != 0x80) {
+                    ok = false;
+                    break;
+                }
+                cp = (cp << 6) | (n & 0x3F);
+                s++;
+            }
+        }
+        if (!ok || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+            out.push_back('?');
+            continue;
+        }
+        if (cp <= 0xFFFF) {
+            out.push_back((jchar)cp);
+        } else {
+            cp -= 0x10000;
+            out.push_back((jchar)(0xD800 + ((cp >> 10) & 0x3FF)));
+            out.push_back((jchar)(0xDC00 + (cp & 0x3FF)));
+        }
+    }
+}
+
+static void append_ascii_to_jchars(const char *s, std::vector<jchar> &out) {
+    if (!s) return;
+    for (; *s; s++) out.push_back((jchar)(unsigned char)*s);
+}
+
+static jstring make_preset_info_jstring(JNIEnv *env, const char *name, int bank, int program) {
+    std::vector<jchar> units;
+    append_loose_utf8_to_jchars((const unsigned char *)(name ? name : "Preset"), units);
+    if (units.empty()) units.push_back('P');
+    char tail[32];
+    snprintf(tail, sizeof(tail), "|%d|%d", bank, program);
+    append_ascii_to_jchars(tail, units);
+    return env->NewString(units.data(), (jsize)units.size());
+}
+
 } // namespace
 
 extern "C" {
@@ -612,9 +677,7 @@ JNIEXPORT jstring JNICALL Java_com_sf2ensemble_synth_SynthBridgePlugin_nativeGet
     if (!f || index < 0 || index >= tsf_get_presetcount(f)) return env->NewStringUTF("");
     const char *name = tsf_get_presetname(f, index);
     const struct tsf_preset *p = &f->presets[index];
-    char buf[320];
-    snprintf(buf, sizeof(buf), "%s|%d|%d", name ? name : "Preset", (int)p->bank, (int)p->preset);
-    return env->NewStringUTF(buf);
+    return make_preset_info_jstring(env, name ? name : "Preset", (int)p->bank, (int)p->preset);
 }
 
 } // extern "C"
