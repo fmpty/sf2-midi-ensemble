@@ -57,15 +57,27 @@
 
     <main>
         <section id="pane-play" class="tab-pane active">
-            <div id="live-jianpu" class="live-jianpu hidden" aria-hidden="true">
-                <div class="live-jianpu-head">
-                    <div class="live-jianpu-label">伴奏简谱</div>
-                    <div class="live-jianpu-status" aria-live="polite"></div>
-                </div>
+            <div id="live-jianpu" class="live-jianpu hidden" aria-hidden="true" aria-label="简谱">
                 <div class="live-jianpu-stream-wrap">
-                    <div class="live-jianpu-pages"></div>
+                    <div class="jp-timeline-scroll">
+                        <div class="jp-timeline-inner">
+                            <div class="jp-playhead" aria-hidden="true"></div>
+                            <div class="live-jianpu-pages jp-lanes"></div>
+                        </div>
+                    </div>
+                    <div class="jp-pager-bar">
+                        <div class="jp-pager jp-pager-tracks">
+                            <button type="button" class="jp-page-btn mini" data-page="track-prev" aria-label="上一组轨">▲</button>
+                            <span class="jp-page-num" id="jp-track-page"></span>
+                            <button type="button" class="jp-page-btn mini" data-page="track-next" aria-label="下一组轨">▼</button>
+                        </div>
+                        <div class="jp-pager jp-pager-time">
+                            <button type="button" class="jp-page-btn mini" data-page="time-prev" aria-label="上一页时间">◀</button>
+                            <span class="jp-page-num" id="jp-time-page"></span>
+                            <button type="button" class="jp-page-btn mini" data-page="time-next" aria-label="下一页时间">▶</button>
+                        </div>
+                    </div>
                 </div>
-                <p class="live-jianpu-hint">横屏播放时跟简谱；练习轨在设置里选</p>
             </div>
             <div class="piano-wrap">
                 <div id="piano" class="piano"></div>

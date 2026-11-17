@@ -38,12 +38,7 @@ import {
     performanceDurationMs,
     getPerformanceEvents,
     summarizePerformanceTracks,
-    defaultJianpuTrackSelection,
-    filterJianpuNoteEvents,
-    buildPracticeNoteList,
-    detectMainMelodyTrack,
-    collapseToMelodyLine,
-    isPracticeTrackMuted,
+    practiceIdForEvent,
     onPlaybackVisibility,
 } from './performance-midi.js';
 import {
@@ -87,201 +82,40 @@ let vkb;
 let MAX_CHANNELS = 32;
 /** @type {LiveJianpuPanel | null} */
 let liveJianpu = null;
-/** 伴奏播放时简谱光标（仅 Note On 计数） */
-/** @type {Set<string> | null} */
-let jianpuTrackPick = null;
-/** 练习轨简谱与播放光标（与筛选后的 Note On 顺序一一对应） */
-let jianpuPlaybackIndex = 0;
-let jianpuScoreNoteCount = 0;
-/** @type {object[]} */
-let jianpuPracticeNoteList = [];
-/** @type {Set<number>} */
-let jianpuPracticeOrds = new Set();
-
-function normalizeJianpuTrackPick(pick, tracks) {
-    if (!pick || !pick.size || !tracks?.length) return pick;
-    const ids = new Set(tracks.map((t) => t.id));
-    const out = new Set();
-    for (const id of pick) {
-        if (ids.has(id)) {
-            out.add(id);
-            continue;
-        }
-        const m = /^t-(\d+)(?:-ch-\d+)?$/.exec(id);
-        if (m && ids.has(`t-${m[1]}`)) out.add(`t-${m[1]}`);
-    }
-    return out.size ? out : pick;
+function isPlaybackMutedForEvent(e) {
+    if (!liveJianpu) return false;
+    const id = practiceIdForEvent(e, getPerformanceEvents());
+    return liveJianpu.isTrackMuted(id);
 }
 
-function isPlaybackMutedPracticeTrack(e) {
-    return !!(jianpuTrackPick && isPracticeTrackMuted(e, jianpuTrackPick));
-}
-
-function practiceTrackLabels(tracks) {
-    if (!jianpuTrackPick || !tracks) return '';
-    const names = tracks.filter((t) => jianpuTrackPick.has(t.id)).map((t) => t.name);
-    return names.length ? names.join('、') : '';
-}
-
-function pickKeySet(pick) {
-    return pick && pick.size ? [...pick].sort().join(',') : '';
-}
-
-function syncRecTrackHint(tracks, pick, noteCount) {
+/** 多轨简谱在面板左侧轨名上点按静音；设置里原练习轨选择区已停用 */
+function renderPracticeTrackPicker() {
+    const box = document.getElementById('rec-track-pick');
+    const chips = document.getElementById('rec-track-chips');
     const hint = document.getElementById('rec-track-hint');
-    if (!hint || !pick || !pick.size) return;
-    const label = (tracks || []).filter((tr) => pick.has(tr.id)).map((tr) => tr.name).join('、');
-    if (label && noteCount > 0) {
-        hint.textContent = `当前练习：${label}（主旋律简谱 ${noteCount} 音，播放时该轨静音）`;
-        hint.classList.remove('hidden');
-    } else if (label) {
-        hint.textContent = `当前练习：${label}（该轨无旋律音符）`;
-        hint.classList.remove('hidden');
-    } else {
+    if (box) box.classList.add('hidden');
+    if (chips) chips.innerHTML = '';
+    if (hint) {
         hint.textContent = '';
         hint.classList.add('hidden');
     }
 }
 
-function renderPracticeTrackPicker() {
-    const box = document.getElementById('rec-track-pick');
-    const chips = document.getElementById('rec-track-chips');
-    if (!box || !chips) return;
-    const hint = document.getElementById('rec-track-hint');
-    if (!hasPerformance()) {
-        box.classList.add('hidden');
-        chips.innerHTML = '';
-        if (hint) {
-            hint.textContent = '';
-            hint.classList.add('hidden');
-        }
-        return;
-    }
-    const tracks = summarizePerformanceTracks(getPerformanceEvents());
-    jianpuTrackPick = normalizeJianpuTrackPick(jianpuTrackPick, tracks);
-    const playable = tracks.filter((t) => t.noteOns > 0);
-    if (!playable.length) {
-        box.classList.add('hidden');
-        chips.innerHTML = '';
-        return;
-    }
-    box.classList.remove('hidden');
-    chips.innerHTML = '';
-    if (!jianpuTrackPick || ![...jianpuTrackPick].every((id) => playable.some((t) => t.id === id))) {
-        jianpuTrackPick = defaultJianpuTrackSelection(tracks);
-    }
-    const mainId = detectMainMelodyTrack(tracks, getPerformanceEvents());
-    const mainBtn = document.createElement('button');
-    mainBtn.type = 'button';
-    const onMain = mainId && jianpuTrackPick.has(mainId);
-    mainBtn.className = `chip${onMain ? ' on' : ' off'}`;
-    mainBtn.textContent = '主旋律（自动简谱）';
-    mainBtn.title = '自动挑一条旋律轨，排成数字 1–7 单行简谱';
-    if (mainId) {
-        mainBtn.addEventListener('click', () => {
-            jianpuTrackPick = new Set([mainId]);
-            const events = getPerformanceEvents();
-            const freshTracks = summarizePerformanceTracks(events);
-            rebuildJianpuFromTracks(events, freshTracks, jianpuTrackPick);
-            renderPracticeTrackPicker();
-        });
-        chips.appendChild(mainBtn);
-    }
-    for (const t of playable) {
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = `chip${jianpuTrackPick.has(t.id) ? ' on' : ' off'}`;
-        btn.title = `${t.noteOns} 个音符`;
-        btn.textContent = `${t.name} · ${t.noteOns} 音`;
-        btn.addEventListener('click', () => {
-            jianpuTrackPick = new Set([t.id]);
-            const events = getPerformanceEvents();
-            const freshTracks = summarizePerformanceTracks(events);
-            const filtered = filterJianpuNoteEvents(events, jianpuTrackPick);
-            liveJianpu?.clearScore();
-            liveJianpu?.resetPlaybackCursor();
-            syncRecTrackHint(freshTracks, jianpuTrackPick, filtered.length);
-            rebuildJianpuFromTracks(events, freshTracks, jianpuTrackPick);
-            renderPracticeTrackPicker();
-        });
-        chips.appendChild(btn);
-    }
-}
-
 function refreshJianpuScore() {
     if (!liveJianpu) return;
+    renderPracticeTrackPicker();
     if (!hasPerformance()) {
-        jianpuTrackPick = null;
         liveJianpu.clearScore();
-        renderPracticeTrackPicker();
         return;
     }
     const events = getPerformanceEvents();
-    const tracks = summarizePerformanceTracks(events);
-    jianpuTrackPick = normalizeJianpuTrackPick(jianpuTrackPick, tracks);
-    const known = new Set(tracks.map((t) => t.id));
-    if (!jianpuTrackPick || ![...jianpuTrackPick].every((id) => known.has(id))) {
-        jianpuTrackPick = defaultJianpuTrackSelection(tracks);
-    }
-    renderPracticeTrackPicker();
-    rebuildJianpuFromTracks(events, tracks);
-}
-
-function applyPracticeJianpu(allEvents, tracks, pick) {
-    if (!liveJianpu || !pick || !pick.size) return 0;
-    const raw = buildPracticeNoteList(allEvents, pick);
-    const label = tracks.filter((tr) => pick.has(tr.id)).map((tr) => tr.name).join('、');
-    const isDrum = /鼓|drum|perc|hit/i.test(label);
-    jianpuPracticeNoteList = isDrum ? raw : collapseToMelodyLine(raw);
-    jianpuPracticeOrds = new Set(jianpuPracticeNoteList.map((e) => e.ord | 0));
-    jianpuScoreNoteCount = jianpuPracticeNoteList.length;
-    jianpuPlaybackIndex = 0;
-    const pickKey = pickKeySet(pick);
-    syncRecTrackHint(tracks, pick, jianpuScoreNoteCount);
-    liveJianpu.setPracticeTitle(isDrum ? label : `主旋律 · ${label}`);
-    liveJianpu.clearScore();
-    const built = liveJianpu.loadScoreSync(
-        jianpuPracticeNoteList,
+    const tracks = summarizePerformanceTracks(events).filter((t) => t.noteOns > 0);
+    liveJianpu.loadMultiTrackTimeline(
+        events,
+        tracks,
+        performanceDurationMs(),
         (ch, drum) => routeForMidiChannel(ch, drum),
-        pickKey,
     );
-    if (pickKeySet(jianpuTrackPick) !== pickKey) return built;
-    if (label && built > 0) {
-        const tail = isDrum ? '鼓谱' : '主旋律简谱';
-        liveJianpu.setStatus(`${tail} ${built} 个音（1–7）`);
-    } else if (!built) {
-        liveJianpu.setStatus('该轨无音符');
-    }
-    liveJianpu.resetPlaybackCursor();
-    return built;
-}
-
-function rebuildJianpuFromTracks(allEvents, tracks, pick = jianpuTrackPick) {
-    applyPracticeJianpu(allEvents, tracks, pick);
-}
-
-/** 播放前按当前所选轨强制重算简谱，避免界面与内存不一致 */
-function syncPracticeJianpuBeforePlay() {
-    if (!liveJianpu || !jianpuTrackPick?.size) return;
-    const events = getPerformanceEvents();
-    const tracks = summarizePerformanceTracks(events);
-    jianpuTrackPick = normalizeJianpuTrackPick(jianpuTrackPick, tracks);
-    applyPracticeJianpu(events, tracks, jianpuTrackPick);
-}
-
-function advanceJianpuPlaybackCursor(e) {
-    if (!liveJianpu?.hasScore || e.type !== 0x90 || e.b <= 0) return;
-    if (!jianpuPracticeOrds.has(e.ord | 0)) return;
-    let idx = jianpuPlaybackIndex;
-    const at = jianpuPracticeNoteList[idx];
-    if (!at || at.ord !== e.ord) {
-        idx = jianpuPracticeNoteList.findIndex(
-            (n, i) => i >= jianpuPlaybackIndex && (n.ord | 0) === (e.ord | 0),
-        );
-        if (idx < 0) return;
-    }
-    liveJianpu.setPlaybackCursor(idx);
-    jianpuPlaybackIndex = idx + 1;
 }
 
 /** MIDI 回放：按通道匹配路由（无路由时用通道缺省，9 为鼓） */
@@ -1846,14 +1680,13 @@ function playbackVelocity(value) {
 function performRecordedEvent(e) {
     if (!engine || !engine.started) return;
     const ch = e.ch | 0;
-    const mutePractice = isPlaybackMutedPracticeTrack(e);
+    const trackMuted = isPlaybackMutedForEvent(e);
     if (e.type === 0x90 && e.b > 0) {
         const vel = playbackVelocity(e.b);
-        if (!mutePractice) {
+        if (!trackMuted) {
             engine.noteOff(ch, e.a);
             if (vel > 0) engine.noteOn(ch, e.a, vel);
         }
-        advanceJianpuPlaybackCursor(e);
     } else if (e.type === 0x80 || (e.type === 0x90 && e.b === 0)) {
         // 无论练习轨是否静音，都要 Off，避免与合成器状态脱节
         engine.noteOff(ch, e.a);
@@ -1887,7 +1720,11 @@ function updateRecUi() {
     btnPlay.textContent = playing ? '停止' : '播放';
     btnExport.disabled = recording || playing || !hasPerformance();
     if (recording) status.textContent = `录制中 ${clockText(recordingElapsedMs())}`;
-    else if (playing) status.textContent = `播放中 ${clockText(playbackElapsedMs())} / ${clockText(performanceDurationMs())}`;
+    else if (playing) {
+        const elapsed = playbackElapsedMs();
+        status.textContent = `播放中 ${clockText(elapsed)} / ${clockText(performanceDurationMs())}`;
+        liveJianpu?.setPlayheadMs(elapsed);
+    }
     else if (hasPerformance()) status.textContent = `已记录 ${clockText(performanceDurationMs())}，可播放或导出 MIDI`;
     else status.textContent = '未录制';
     if ((recording || playing) && !recUiTimer) recUiTimer = setInterval(updateRecUi, 250);
@@ -1939,7 +1776,6 @@ function bindPerformance() {
         }
         if (isCapturing()) {
             stopRecording();
-            jianpuTrackPick = null;
             refreshJianpuScore();
             log('演奏记录已停止', 'ok');
         } else {
@@ -1957,7 +1793,6 @@ function bindPerformance() {
         if (isCapturing()) return;
         if (isPlaying()) {
             abortPerformancePlayback();
-            jianpuPlaybackIndex = 0;
             liveJianpu?.resetPlaybackCursor();
             updateRecUi();
             return;
@@ -1967,16 +1802,9 @@ function bindPerformance() {
             return;
         }
         if (!hasPerformance()) return;
-        syncPracticeJianpuBeforePlay();
-        const trk = practiceTrackLabels(summarizePerformanceTracks(getPerformanceEvents()));
-        log(
-            trk
-                ? `播放：练习轨「${trk}」静音 · 简谱 ${jianpuScoreNoteCount} 音`
-                : '播放演奏记录',
-            'info',
-        );
+        refreshJianpuScore();
+        log('播放：横屏可看多轨简谱时间轴；点轨名可静音', 'info');
         showTab('play');
-        jianpuPlaybackIndex = 0;
         liveJianpu?.resetPlaybackCursor();
         playPerformance(performRecordedEvent, () => {
             applyAllRoutes();
@@ -2002,7 +1830,6 @@ function bindPerformance() {
                 if (isCapturing()) stopRecording();
                 if (isPlaying()) abortPerformancePlayback();
                 loadPerformance(parseMidi(await file.arrayBuffer()));
-                jianpuTrackPick = null;
                 refreshJianpuScore();
                 log(`已导入 ${file.name}`, 'ok');
             } catch (err) {
@@ -2192,7 +2019,12 @@ async function main() {
             lastJianpuOrient = orient;
         });
         window.addEventListener('orientationchange', () => {
-            setTimeout(() => liveJianpu.syncVisible(), 200);
+            setTimeout(() => {
+                liveJianpu.syncVisible();
+                if (document.documentElement.dataset.orient === 'landscape' && hasPerformance()) {
+                    refreshJianpuScore();
+                }
+            }, 280);
         });
     }
     initLayout(() => renderPiano());
