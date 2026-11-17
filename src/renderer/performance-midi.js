@@ -23,6 +23,17 @@ let playNotes = [];
 let playGen = 0;
 let playStarted = 0;
 
+/** 避免播放/静音判断时对整表反复 slice+sort */
+let sortedEventsCache = null;
+let sortedEventsLen = -1;
+let jianpuTrackModeCache = null;
+
+function invalidatePerformanceCaches() {
+    sortedEventsCache = null;
+    sortedEventsLen = -1;
+    jianpuTrackModeCache = null;
+}
+
 function nowMs() {
     return capturing ? Math.max(0, performance.now() - startedAt) : 0;
 }
@@ -53,6 +64,7 @@ function keyOf(ch, note) {
 function push(ev) {
     ev.ord = seq++;
     events.push(ev);
+    invalidatePerformanceCaches();
 }
 
 function pushNoteOn(ch, note, vel) {
@@ -160,6 +172,7 @@ export function captureRouteProgram(route) {
 
 export function startRecording(routes) {
     events = [];
+    invalidatePerformanceCaches();
     importedSmfMultiTrack = false;
     held.clear();
     lastProgram.clear();
@@ -188,11 +201,32 @@ export function stopRecording() {
 }
 
 function sortedEvents() {
-    return events.slice().sort((a, b) => a.ms - b.ms || a.ord - b.ord);
+    if (sortedEventsCache && sortedEventsLen === events.length) return sortedEventsCache;
+    sortedEventsCache = events.slice().sort((a, b) => a.ms - b.ms || a.ord - b.ord);
+    sortedEventsLen = events.length;
+    return sortedEventsCache;
 }
 
 export function getPerformanceEvents() {
     return sortedEvents();
+}
+
+/** 简谱轨 ID 模式；不依赖全表排序 */
+export function getJianpuTrackMode() {
+    if (jianpuTrackModeCache) return jianpuTrackModeCache;
+    if (importedSmfMultiTrack) {
+        jianpuTrackModeCache = 'smf';
+        return jianpuTrackModeCache;
+    }
+    const trks = new Set();
+    let sawTrk = false;
+    for (const e of events) {
+        if (e.trk == null) continue;
+        sawTrk = true;
+        trks.add(e.trk | 0);
+    }
+    jianpuTrackModeCache = !sawTrk ? 'channel' : trks.size > 1 ? 'smf' : 'channel';
+    return jianpuTrackModeCache;
 }
 
 export function jianpuTrackGrouping(events) {
@@ -207,11 +241,30 @@ export function jianpuTrackGrouping(events) {
 /** 与 summarize / filter / 静音 共用的练习轨 ID */
 export function practiceIdForEvent(e, events = null) {
     if (!e) return 'ch-0';
-    const list = resolvedPerformanceList(events);
-    const mode = jianpuTrackGrouping(list);
+    const mode = events ? jianpuTrackGrouping(events) : getJianpuTrackMode();
     const ch = e.ch | 0;
     if (mode === 'smf' && e.trk != null) return `t-${e.trk | 0}`;
     return `ch-${ch}`;
+}
+
+/** 一次扫描按轨收集 note-on，供简谱排版（避免每轨 filter 全表） */
+export function buildTrackNoteIndex(trackIds) {
+    const ids = trackIds instanceof Set ? trackIds : new Set(trackIds);
+    const map = new Map();
+    for (const id of ids) map.set(id, []);
+    const mode = getJianpuTrackMode();
+    for (const e of events) {
+        if (e.type !== 0x90 || e.b <= 0) continue;
+        let id;
+        if (mode === 'smf' && e.trk != null) id = `t-${e.trk | 0}`;
+        else id = `ch-${e.ch | 0}`;
+        if (!ids.has(id)) continue;
+        map.get(id).push(e);
+    }
+    for (const arr of map.values()) {
+        if (arr.length > 1) arr.sort((a, b) => a.ms - b.ms || (a.ord | 0) - (b.ord | 0));
+    }
+    return map;
 }
 
 function smfTrackId(trk) {
@@ -611,8 +664,10 @@ export function parseMidi(buffer) {
 export function loadPerformance(list) {
     stopPlayback();
     events = (list || []).map((e, i) => ({ ...e, ord: i }));
+    invalidatePerformanceCaches();
     const trks = new Set(events.map((e) => e.trk).filter((t) => t != null));
     importedSmfMultiTrack = trks.size > 1;
+    getJianpuTrackMode();
     seq = events.length;
     capturing = false;
     held.clear();
@@ -742,7 +797,10 @@ export function playPerformance(sink, onDone) {
             if (e.type === 0x90 && e.b > 0) {
                 playNotes.push({ ch: e.ch, note: e.a, trk: e.trk, drum: e.drum });
             } else if (e.type === 0x80 || (e.type === 0x90 && e.b === 0)) {
-                playNotes = playNotes.filter((n) => n.ch !== e.ch || n.note !== e.a);
+                for (let pi = playNotes.length - 1; pi >= 0; pi--) {
+                    const n = playNotes[pi];
+                    if (n.ch === e.ch && n.note === e.a) playNotes.splice(pi, 1);
+                }
             }
             const bank = banks.get(e.ch) || { msb: 0, lsb: 0 };
             sink({ ...e, bank });

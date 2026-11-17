@@ -84,7 +84,7 @@ let MAX_CHANNELS = 32;
 let liveJianpu = null;
 function isPlaybackMutedForEvent(e) {
     if (!liveJianpu) return false;
-    const id = practiceIdForEvent(e, getPerformanceEvents());
+    const id = practiceIdForEvent(e);
     return liveJianpu.isTrackMuted(id);
 }
 
@@ -1830,7 +1830,11 @@ function bindPerformance() {
                 if (isCapturing()) stopRecording();
                 if (isPlaying()) abortPerformancePlayback();
                 loadPerformance(parseMidi(await file.arrayBuffer()));
-                refreshJianpuScore();
+                if (isElectron()) {
+                    setTimeout(() => refreshJianpuScore(), 0);
+                } else {
+                    refreshJianpuScore();
+                }
                 log(`已导入 ${file.name}`, 'ok');
             } catch (err) {
                 log(`导入失败：${err.message}`, 'error');

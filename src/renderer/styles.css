@@ -490,24 +490,20 @@ html[data-orient="portrait"] #live-jianpu {
 .jp-chord.jp-chord-dense .jp-note {
     margin: 0;
 }
-.jp-chord.jp-chord-dense .jp-n {
+.jp-chord.jp-chord-dense .jp-head {
     font-size: clamp(10px, 1.85vmin, 13px);
 }
-.jp-chord.jp-chord-dense .jp-high,
-.jp-chord.jp-chord-dense .jp-low {
-    font-size: .42em;
-}
-.jp-event.jp-event-dense .jp-note:not(.drum) .jp-n {
+.jp-event.jp-event-dense .jp-note:not(.drum) .jp-head {
     font-size: clamp(11px, 2vmin, 14px);
 }
-.jp-measure.jp-measure-dense .jp-note:not(.drum) .jp-n {
+.jp-measure.jp-measure-dense .jp-note:not(.drum) .jp-head {
     font-size: clamp(11px, 1.95vmin, 15px);
 }
 .jp-measure.jp-measure-dense .jp-event {
     margin: 0 1px;
     padding: 0 2px;
 }
-.jp-lane-busy .jp-lane-rail .jp-note:not(.drum) .jp-n {
+.jp-lane-busy .jp-lane-rail .jp-note:not(.drum) .jp-head {
     font-size: clamp(11px, 2vmin, 16px);
 }
 .jp-note {
@@ -517,37 +513,62 @@ html[data-orient="portrait"] #live-jianpu {
     margin: 1px 0;
     color: #f2f6fc;
 }
-.jp-note .jp-n {
+.jp-note .jp-head {
+    display: inline-flex;
+    align-items: baseline;
+    vertical-align: bottom;
+    /** 附点 / 八度点 的字号、与数字间距均相对本块 font-size */
     font-size: clamp(15px, 2.6vmin, 21px);
+    --jp-dot-size: 0.68em;
+    --jp-dot-gap: 0.07em;
+}
+.jp-note .jp-n-stack {
+    position: relative;
+    display: inline-block;
+    vertical-align: bottom;
+    font-size: 1em;
+}
+.jp-note .jp-n {
+    font-size: 1em;
     font-weight: 700;
     font-family: "PingFang SC", "Source Han Serif SC", SimSun, "Segoe UI", sans-serif;
-    line-height: 1.1;
+    line-height: 1;
     color: #fafcff;
+    display: block;
+    text-align: center;
+}
+.jp-note .jp-dur-dot {
+    font-size: var(--jp-dot-size);
+    line-height: 1;
+    margin-left: 0.06em;
+    color: #fafcff;
+    flex: none;
 }
 .jp-note.drum .jp-n {
     font-size: 9px;
     font-weight: 500;
     color: #d8c8a0;
 }
-.jp-note .jp-high {
+/* 八度点：横排；间距用 em 随数字等比缩放 */
+.jp-n-stack .jp-oct-wrap {
     position: absolute;
-    left: 0;
-    right: 0;
-    top: -.48em;
-    font-size: .48em;
-    letter-spacing: .06em;
-    color: #8ec8ff;
+    left: 50%;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    pointer-events: none;
     line-height: 1;
+    font-size: var(--jp-dot-size);
+    letter-spacing: 0.14em;
+    color: #8ec8ff;
+    text-align: center;
 }
-.jp-note .jp-low {
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: -.42em;
-    font-size: .48em;
-    letter-spacing: .06em;
-    color: #8ec8ff;
-    line-height: 1;
+.jp-n-stack .jp-high.jp-oct-wrap {
+    bottom: 100%;
+    margin-bottom: var(--jp-dot-gap);
+}
+.jp-n-stack .jp-low.jp-oct-wrap {
+    top: 100%;
+    margin-top: var(--jp-dot-gap);
 }
 .jp-note .jp-ul {
     display: block;
@@ -570,12 +591,6 @@ html[data-orient="portrait"] #live-jianpu {
     width: 1.4em;
     border-top: 2px solid rgba(230, 238, 250, .9);
     margin-left: 2px;
-}
-.jp-note.dur-dotted-mark .jp-n::after {
-    content: "·";
-    font-size: .55em;
-    vertical-align: middle;
-    margin-left: 1px;
 }
 .live-jianpu-pages.jp-lanes,
 .jp-lanes.live-jianpu-pages {

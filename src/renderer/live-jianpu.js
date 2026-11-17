@@ -2,10 +2,10 @@
  * 多轨简谱时间轴：参考 midi_jianpu_player.html 的小节+数字排版，横轴按小节对齐时间。
  */
 import { DRUM_NOTES } from './gm.js';
-import { buildPracticeNoteList, practiceIdForEvent } from './performance-midi.js';
-import { isMobile } from './platform.js';
+import { buildTrackNoteIndex } from './performance-midi.js';
+import { isElectron, isMobile } from './platform.js';
 
-const MAX_NOTES_PER_LANE = isMobile() ? 650 : 1200;
+const MAX_NOTES_PER_LANE = isMobile() ? 650 : isElectron() ? 900 : 1200;
 const LANE_LABEL_W = 96;
 const MEASURE_MS = 2000;
 const BEAT_MS = 500;
@@ -105,7 +105,8 @@ function guessKey(pitches) {
 function glyph(midiNum, tonic) {
     const n = clampMidi(midiNum);
     const rel = ((n % 12) - tonic + 12) % 12;
-    const oct = Math.floor(n / 12) - 4;
+    /** 中央 C = MIDI 60 → 无高低点；每 12 半音一个点 */
+    const oct = Math.floor(n / 12) - 5;
     let digit;
     let acc = false;
     const i = MAJOR.indexOf(rel);
@@ -141,6 +142,17 @@ function durClassFromGap(gapMs) {
     return 'sixteenth';
 }
 
+/** @param {number} count @param {'jp-high' | 'jp-low'} place */
+function appendOctaveDots(stack, count, place) {
+    const n = count | 0;
+    if (n <= 0) return;
+    const wrap = document.createElement('span');
+    wrap.className = `${place} jp-oct-wrap`;
+    wrap.textContent = '·'.repeat(n);
+    wrap.setAttribute('aria-hidden', 'true');
+    stack.appendChild(wrap);
+}
+
 function buildNoteEl(g, durKey, { drum = false, drumText = '' } = {}) {
     const note = document.createElement('span');
     note.className = `jp-note dur-${durKey}${drum ? ' drum' : ''}`;
@@ -151,22 +163,24 @@ function buildNoteEl(g, durKey, { drum = false, drumText = '' } = {}) {
         note.appendChild(core);
         return note;
     }
-    if (g.high) {
-        const h = document.createElement('span');
-        h.className = 'jp-high';
-        h.textContent = '·'.repeat(g.high);
-        note.appendChild(h);
-    }
+    const head = document.createElement('span');
+    head.className = 'jp-head';
+    const stack = document.createElement('span');
+    stack.className = 'jp-n-stack';
+    appendOctaveDots(stack, g.high, 'jp-high');
     const core = document.createElement('span');
     core.className = 'jp-n';
     core.textContent = g.digit;
-    note.appendChild(core);
-    if (g.low) {
-        const lo = document.createElement('span');
-        lo.className = 'jp-low';
-        lo.textContent = '·'.repeat(g.low);
-        note.appendChild(lo);
+    stack.appendChild(core);
+    appendOctaveDots(stack, g.low, 'jp-low');
+    head.appendChild(stack);
+    if (durKey === 'dotted') {
+        const durDot = document.createElement('span');
+        durDot.className = 'jp-dur-dot';
+        durDot.textContent = '·';
+        head.appendChild(durDot);
     }
+    note.appendChild(head);
     if (durKey === 'eighth' || durKey === 'sixteenth') {
         const ul = document.createElement('span');
         ul.className = 'jp-ul';
@@ -177,9 +191,8 @@ function buildNoteEl(g, durKey, { drum = false, drumText = '' } = {}) {
             note.appendChild(ul2);
         }
     }
-  if (durKey === 'half') note.classList.add('dur-half-line');
+    if (durKey === 'half') note.classList.add('dur-half-line');
     if (durKey === 'whole') note.classList.add('dur-whole-line');
-    if (durKey === 'dotted') note.classList.add('dur-dotted-mark');
     return note;
 }
 
@@ -243,13 +256,9 @@ function scanLaneLayout(notes, pxPerMs) {
     };
 }
 
-function collectTrackNotes(allEvents, trackId) {
-    let notes = buildPracticeNoteList(allEvents, new Set([trackId]));
-    if (!notes.length) {
-        notes = (allEvents || [])
-            .filter((e) => e.type === 0x90 && e.b > 0 && practiceIdForEvent(e, allEvents) === trackId)
-            .sort((a, b) => a.ms - b.ms || (a.ord | 0) - (b.ord | 0));
-    }
+function collectTrackNotes(trackId, noteIndex) {
+    let notes = noteIndex?.get(trackId);
+    if (!notes?.length) notes = [];
     if (notes.length > MAX_NOTES_PER_LANE) notes = notes.slice(0, MAX_NOTES_PER_LANE);
     return notes;
 }
@@ -426,7 +435,7 @@ export class LiveJianpuPanel {
     }
 
     _laneHeightForTrack(trackMeta, ctx) {
-        const notes = collectTrackNotes(ctx.allEvents, trackMeta.id);
+        const notes = collectTrackNotes(trackMeta.id, ctx.noteIndex);
         if (!notes.length) return LANE_BASE_H + 1;
         return scanLaneLayout(notes, this.pxPerMs).railHeight + 1;
     }
@@ -536,7 +545,7 @@ export class LiveJianpuPanel {
         const tracks = ctx.playable.slice(trkSlice.start, trkSlice.start + trkSlice.count);
 
         for (const t of tracks) {
-            const notes = collectTrackNotes(ctx.allEvents, t.id);
+            const notes = collectTrackNotes(t.id, ctx.noteIndex);
             if (!notes.length) continue;
             const layout = scanLaneLayout(notes, this.pxPerMs);
 
@@ -678,11 +687,9 @@ export class LiveJianpuPanel {
         this._lastAvailH = -1;
 
         const playable = (trackMeta || []).filter((t) => t.noteOns > 0);
+        const noteIndex = buildTrackNoteIndex(playable.map((t) => t.id));
         let totalNotes = 0;
-        for (const t of playable) {
-            const n = collectTrackNotes(allEvents, t.id);
-            if (n.length) totalNotes += n.length;
-        }
+        for (const t of playable) totalNotes += (noteIndex.get(t.id)?.length || 0);
         const laneCount = playable.length;
 
         if (gen !== this._loadGen) return 0;
@@ -698,6 +705,7 @@ export class LiveJianpuPanel {
             playable,
             dur,
             routeForChannel,
+            noteIndex,
         };
         this.hasScore = laneCount > 0;
         this.setPracticeTitle(laneCount ? `简谱 ${laneCount} 轨` : '简谱');
