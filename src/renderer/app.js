@@ -562,7 +562,7 @@ function syncDevices(list, opts = {}) {
             if (m) scanMacs.add(m);
         }
         if (pruneGhostMidiRoutes(scanMacs, onlineMacs)) changed = true;
-        if (pendingOpts.dropAbsent && devices.length > 0 && dropAbsentMidiRoutes(devices)) changed = true;
+        if (pendingOpts.dropAbsent && dropAbsentMidiRoutes(devices)) changed = true;
 
         if (!state.routes[VIRTUAL_KEY]) {
             state.routes[VIRTUAL_KEY] = defaultRoute(VIRTUAL_KEY, '电脑键盘', 'virtual', pickChannel(null));
@@ -1942,6 +1942,10 @@ async function main() {
         ...extra,
         immediate: true,
         rawNative: extra.rawNative ?? list,
+        dropAbsent:
+            !!(extra.dropAbsent
+                || extra.disconnectedMac
+                || (isNativeMidiAvailable() && hub._nativeScanSeen)),
     });
     hub.onRawMidi = (deviceId, deviceMacHint) => {
         claimOrUpdateRouteFromMidiDevice(deviceId, deviceMacHint);

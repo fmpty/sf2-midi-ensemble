@@ -48,6 +48,7 @@ export function isBluetoothMidiEntry(dev) {
 
 /** 在线：Android/iOS 看 portOpen；Web MIDI 看 state/connection */
 export function isMidiDeviceOnline(dev) {
+    if (typeof dev.online === 'boolean') return dev.online;
     if (dev.portOpen === true) return true;
     if (dev.statusCode === 3) return true;
     if (dev.state === 'disconnected') return false;

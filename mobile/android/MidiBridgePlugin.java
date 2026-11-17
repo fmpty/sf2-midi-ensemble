@@ -146,6 +146,19 @@ public class MidiBridgePlugin extends Plugin {
                         layerLog("L1-BT", "ACL_DISCONNECTED mac=" + macFromAddr(dev.getAddress()));
                         mainHandler.post(() -> handleBluetoothDisconnected(dev.getAddress()));
                     }
+                } else if (BluetoothDevice.ACTION_BOND_STATE_CHANGED.equals(action)) {
+                    BluetoothDevice dev;
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        dev = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice.class);
+                    } else {
+                        dev = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                    }
+                    if (dev == null) return;
+                    int bond = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, BluetoothDevice.ERROR);
+                    if (bond == BluetoothDevice.BOND_NONE) {
+                        layerLog("L1-BT", "BOND_NONE mac=" + macFromAddr(dev.getAddress()));
+                        mainHandler.post(() -> handleBluetoothUnbonded(dev.getAddress()));
+                    }
                 } else if (BluetoothDevice.ACTION_ACL_CONNECTED.equals(action)) {
                     mainHandler.post(() -> {
                         BluetoothDevice dev;
@@ -168,6 +181,7 @@ public class MidiBridgePlugin extends Plugin {
         IntentFilter filter = new IntentFilter();
         filter.addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED);
         filter.addAction(BluetoothDevice.ACTION_ACL_CONNECTED);
+        filter.addAction(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             ctx.registerReceiver(btStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
         } else {
@@ -258,6 +272,51 @@ public class MidiBridgePlugin extends Plugin {
         emitDevices(norm);
     }
 
+    /** 用户在系统设置里「取消配对」：清缓存并通知 Web 标离线 */
+    private void handleBluetoothUnbonded(String addr) {
+        if (addr == null || addr.isEmpty()) return;
+        String norm = macFromAddr(addr);
+        String btKey = btKeyFromAddr(addr);
+        if (btKey != null) closeDevice(btKey, "unbond");
+        for (String key : new ArrayList<>(meta.keySet())) {
+            JSObject m = meta.get(key);
+            if (m == null) continue;
+            String mac = m.optString("mac", "");
+            if (!mac.isEmpty() && mac.equalsIgnoreCase(norm)) {
+                closeDevice(key, "unbond");
+            }
+        }
+        bleFound.remove(addr);
+        bleFound.remove(norm);
+        emitDevices(norm);
+    }
+
+    private void purgeUnbondedBluetoothMeta() {
+        if (!hasBluetoothPermission()) return;
+        Context ctx = getContext();
+        BluetoothManager bm = ctx == null ? null : (BluetoothManager) ctx.getSystemService(Context.BLUETOOTH_SERVICE);
+        if (bm == null || bm.getAdapter() == null) return;
+        Set<String> bondedMacs = new HashSet<>();
+        try {
+            Set<BluetoothDevice> bonded = bm.getAdapter().getBondedDevices();
+            if (bonded != null) {
+                for (BluetoothDevice dev : bonded) {
+                    String mac = macFromAddr(dev.getAddress());
+                    if (!mac.isEmpty()) bondedMacs.add(mac.toUpperCase(Locale.US));
+                }
+            }
+        } catch (SecurityException e) {
+            return;
+        }
+        for (String key : new ArrayList<>(meta.keySet())) {
+            JSObject m = meta.get(key);
+            if (m == null || !"bluetooth".equals(m.optString("type", ""))) continue;
+            String mac = m.optString("mac", "").toUpperCase(Locale.US);
+            if (mac.isEmpty() || bondedMacs.contains(mac)) continue;
+            closeDevice(key, "unbonded-purge");
+        }
+    }
+
     private MidiDeviceInfo findMidiInfoByMac(String mac) {
         if (mac == null || mac.isEmpty() || midiManager == null) return null;
         MidiDeviceInfo[] infos = midiManager.getDevices();
@@ -313,6 +372,51 @@ public class MidiBridgePlugin extends Plugin {
         }
         layerLog("L2-SYS", "sync systemMidi=" + (infos == null ? 0 : infos.length)
                 + " activeMacs=" + activeMacs.size() + " opened=" + opened.size() + " opening=" + opening.size());
+    }
+
+    /**
+     * 鸿蒙/卓易通等才走 GATT 兜底；普通 Android 保持系统 MIDI，避免残留幽灵设备。
+     */
+    private boolean preferHarmonyGattWorkarounds() {
+        String m = Build.MANUFACTURER != null ? Build.MANUFACTURER.toLowerCase(Locale.US) : "";
+        String brand = Build.BRAND != null ? Build.BRAND.toLowerCase(Locale.US) : "";
+        if (m.contains("huawei") || m.contains("honor") || brand.contains("huawei") || brand.contains("honor")) {
+            return true;
+        }
+        try {
+            Class.forName("com.huawei.system.BuildEx");
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private boolean hasBondedMidiController() {
+        if (!hasBluetoothPermission()) return false;
+        Context ctx = getContext();
+        BluetoothManager bm = ctx == null ? null : (BluetoothManager) ctx.getSystemService(Context.BLUETOOTH_SERVICE);
+        if (bm == null || bm.getAdapter() == null) return false;
+        try {
+            Set<BluetoothDevice> bonded = bm.getAdapter().getBondedDevices();
+            if (bonded == null) return false;
+            for (BluetoothDevice dev : bonded) {
+                if (looksLikeMidiController(safeDeviceName(dev))) return true;
+            }
+        } catch (SecurityException ignored) {
+        }
+        return false;
+    }
+
+    /** 系统里已无 MIDI 手柄配对时，清掉 bt#/GATT 缓存（取消配对后列表不应再有两台） */
+    private void purgeBluetoothWhenNoBondedMidi() {
+        if (hasBondedMidiController()) return;
+        for (String key : new ArrayList<>(meta.keySet())) {
+            JSObject m = meta.get(key);
+            if (m == null) continue;
+            if ("bluetooth".equals(m.optString("type", "")) || key.startsWith("bt#")) {
+                closeDevice(key, "no-bonded-midi");
+            }
+        }
     }
 
     private boolean hasBluetoothPermission() {
@@ -517,11 +621,16 @@ public class MidiBridgePlugin extends Plugin {
             midiManager.openBluetoothDevice(dev, device -> {
                 opening.remove(key);
                 if (device == null) {
-                    layerLog("L3-open", "openBluetoothDevice null key=" + key + " → gatt");
-                    JSObject m = meta.get(key);
-                    if (m != null) m.put("connected", false);
-                    scheduleGattFallback(key);
-                    mainHandler.post(MidiBridgePlugin.this::emitDevices);
+                    if (preferHarmonyGattWorkarounds()) {
+                        layerLog("L3-open", "openBluetoothDevice null key=" + key + " → gatt");
+                        JSObject m = meta.get(key);
+                        if (m != null) m.put("connected", false);
+                        scheduleGattFallback(key);
+                        mainHandler.post(MidiBridgePlugin.this::emitDevices);
+                    } else {
+                        layerLog("L3-open", "openBluetoothDevice null key=" + key + " close");
+                        closeDevice(key, "openBluetooth-null");
+                    }
                     return;
                 }
                 attachOutputPort(key, device);
@@ -529,11 +638,11 @@ public class MidiBridgePlugin extends Plugin {
         } catch (RuntimeException e) {
             layerLog("L3-open", "openBluetooth exception key=" + key);
             opening.remove(key);
-            if (meta.containsKey(key)) {
+            if (preferHarmonyGattWorkarounds() && meta.containsKey(key)) {
                 scheduleGattFallback(key);
                 mainHandler.post(MidiBridgePlugin.this::emitDevices);
             } else {
-                meta.remove(key);
+                closeDevice(key, "openBluetooth-exc");
             }
         }
     }
@@ -636,6 +745,10 @@ public class MidiBridgePlugin extends Plugin {
 
     /** 系统 MIDI 端口打不开时，直接订 BLE-MIDI 特征。同一条连接等系统先松开。 */
     private void scheduleGattFallback(String key) {
+        if (!preferHarmonyGattWorkarounds()) {
+            closeDevice(key, "no-gatt-stock-android");
+            return;
+        }
         if (opened.containsKey(key) || gattLive.contains(key) || gattSessions.containsKey(key) || gattPending.contains(key)) {
             return;
         }
@@ -896,6 +1009,8 @@ public class MidiBridgePlugin extends Plugin {
     }
 
     private JSArray deviceArray() {
+        purgeUnbondedBluetoothMeta();
+        purgeBluetoothWhenNoBondedMidi();
         closeDroppedBluetoothPorts();
         syncDeviceListState();
         LinkedHashMap<String, JSObject> byMac = new LinkedHashMap<>();
@@ -967,6 +1082,7 @@ public class MidiBridgePlugin extends Plugin {
 
     /** 已配对且名称含 midi、端口尚未打开：先出现在列表（离线），打开成功后再变为在线 */
     private void appendBondedMidiPreview(JSArray arr) {
+        if (!preferHarmonyGattWorkarounds()) return;
         if (!hasBluetoothPermission()) return;
         Context ctx = getContext();
         if (ctx == null) return;
@@ -1261,7 +1377,9 @@ public class MidiBridgePlugin extends Plugin {
         layerLog("L3-retry", "openAllMidiRetryPass");
         openBondedMidiControllers();
         openAllSystemMidi();
-        ensureGattForLinkedBonded();
+        if (preferHarmonyGattWorkarounds()) {
+            ensureGattForLinkedBonded();
+        }
         emitDevices();
     }
 

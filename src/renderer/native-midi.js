@@ -50,7 +50,8 @@ function toDev(d) {
         connected: portOpen,
         portOpen,
         statusCode: d.statusCode != null ? Number(d.statusCode) : (portOpen ? 3 : 0),
-        online: portOpen || d.statusCode === 3,
+        /** 仅 portOpen 算在线，避免鸿蒙兼容层 statusCode/connected 误报 */
+        online: portOpen,
         state: portOpen ? 'connected' : 'disconnected',
         connection: portOpen ? 'open' : '',
         guessBluetooth: /bluetooth|ble/i.test(d.type || '') || !!d.bluetooth,
@@ -176,6 +177,9 @@ export class NativeMidiHub {
         if (extra.disconnectedMac) this._clearActivityForMac(extra.disconnectedMac);
         this.devices = list;
         if (list.length > 0) this._nativeScanSeen = true;
+        if (list.length === 0) {
+            extra = { ...extra, dropAbsent: true };
+        }
         midiLayerLog('L4-cap', 'publish', {
             n: list.length,
             ids: list.map((d) => d.id),
